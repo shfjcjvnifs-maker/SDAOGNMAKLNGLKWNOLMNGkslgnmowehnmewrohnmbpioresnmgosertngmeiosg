@@ -34,6 +34,10 @@ local unload_lists = {}
 -- destroyed one by one.
 local unload_drawings = {}
 
+-- Cleanup that has to run, not just be dropped, when the script unloads. Same
+-- reason as the lists above: the table has to exist before the unload closure.
+local unload_callbacks = {}
+
 -- The auto walk loop lives at the end of the chunk and waits for the frame
 -- the menu is first on screen for, so it starts after the ui, not under it.
 
@@ -1847,15 +1851,28 @@ local menu = {
                         ["Parent"] = hui
                     })
                     textbox:CaptureFocus()
-                    keypress(0xA2)
-                    keypress(0x56)
-                    wait()
-                    keyrelease(0xA2)
-                    keyrelease(0x56)
+
+                    -- The paste is driven by synthetic keys, and an executor
+                    -- without keypress throws on the first one. The box has to
+                    -- be destroyed either way: a TextBox left holding focus
+                    -- keeps every key - WASD included - for itself, which is a
+                    -- character that cannot move.
+                    pcall(function()
+                        keypress(0xA2)
+                        keypress(0x56)
+                        wait()
+                        keyrelease(0xA2)
+                        keyrelease(0x56)
+                    end)
+
                     local text = textbox["Text"]
                     if text and #text > 0 then
                         current_input ..= text
                     end
+
+                    pcall(function()
+                        textbox:ReleaseFocus()
+                    end)
                     textbox["Parent"] = nil
                     textbox:Destroy()
                 elseif keycode then
@@ -2613,13 +2630,22 @@ local menu = {
                     ["Parent"] = hui
                 })
                 textbox:CaptureFocus()
-                keypress(0xA2)
-                keypress(0x56)
-                wait()
-                wait()
-                keyrelease(0xA2)
-                keyrelease(0x56)
+
+                -- Same as the typing box: synthetic keys can throw, and a box
+                -- that keeps focus takes the movement keys with it.
+                pcall(function()
+                    keypress(0xA2)
+                    keypress(0x56)
+                    wait()
+                    wait()
+                    keyrelease(0xA2)
+                    keyrelease(0x56)
+                end)
+
                 local text = textbox["Text"]
+                pcall(function()
+                    textbox:ReleaseFocus()
+                end)
                 textbox:Destroy()
 
                 local r, g, b = 255, 255, 255
@@ -8189,6 +8215,17 @@ local menu = {
                 heartbeat[i] = nil
             end
 
+            -- Runs before the connections are cut, so nothing a callback reads
+            -- through a signal is already gone. A throw here must not stop the
+            -- rest of the unload.
+            for i = 1, #unload_callbacks do
+                pcall(unload_callbacks[i])
+            end
+
+            for i = #unload_callbacks, 1, -1 do
+                unload_callbacks[i] = nil
+            end
+
             for i = 1, #unload_lists do
                 local list = unload_lists[i]
 
@@ -8462,6 +8499,8 @@ local wait_for_child = workspace["WaitForChild"]
 local get_children = workspace["GetChildren"]
 local render_stepped = run_service["RenderStepped"]
 local render_stepped_wait = render_stepped["Wait"]
+local heartbeat_signal = run_service["Heartbeat"]
+local heartbeat_wait = heartbeat_signal["Wait"]
 local vector3_new = Vector3["new"]
 local cframe_new = CFrame["new"]
 local vector3_zero = Vector3["zero"]
@@ -8488,6 +8527,39 @@ local local_knocked = false
 local ragebot_force_position = nil
 local in_void = false
 local stomping = false
+
+-- One body, four values. A hop saves them, writes the part for the server,
+-- waits a step, and writes all four back. The frame on its own is not enough:
+-- the physics step in between leaves an assembly velocity behind, and a body
+-- that keeps it walks off carrying the place it was sent to instead of the one
+-- it stands on.
+--
+-- The save is not the body's current frame. A hop yields for a render step, and
+-- a second hop that starts before the first one has come back would save the
+-- void the first one wrote and put the body back there for good - the character
+-- left falling in the void with nothing to bring it home. Every hop saves from
+-- the last frame the body was seen at on the map instead.
+local home_frame = nil
+local home_velocity = nil
+local home_linear_velocity = nil
+local home_angular_velocity = nil
+local out_of_bounds_since = 0
+
+local function frame_in_bounds(frame)
+    local position = frame["Position"]
+
+    return abs(position["X"]) < 50000 and abs(position["Z"]) < 50000 and position["Y"] > -10000 and position["Y"] < 100000
+end
+
+local function save_body(hrp)
+    local frame = hrp["CFrame"]
+
+    if home_frame and not frame_in_bounds(frame) then
+        return home_frame, home_linear_velocity or vector3_zero, home_angular_velocity or vector3_zero, home_velocity or vector3_zero
+    end
+
+    return frame, hrp["AssemblyLinearVelocity"], hrp["AssemblyAngularVelocity"], hrp["Velocity"]
+end
 -- Ragebot hitbox selection. The dropdown names either one part or a group
 -- whose part is rolled per target and held for a short window, so the aim and
 -- the shot resolve to the same part instead of jittering every frame.
@@ -8658,6 +8730,10 @@ local local_gun = nil
 local local_following = false
 
 local purchasing = nil
+-- Clock of the last purchase that ended without the cash moving. Auto armor
+-- reads it to stand off after a refusal instead of asking again on the next
+-- frame and holding the character in the shop hop.
+local last_purchase_failed = 0
 local vehicle_data = {}
 local vehicle = nil
 
@@ -8704,6 +8780,10 @@ do
         setrawmetatable(hrp, new)
     end
 
+    -- Copied from antistuck.lua, which is the build that does not leave the
+    -- character stuck. The property is not fought: a blocked write is dropped
+    -- and its value is kept in the cache the game reads back, so the game sees
+    -- its own freeze land while the real property keeps the standing speed.
     local function hook_humanoid(humanoid)
         local old = getrawmetatable(humanoid)
         local old_index = old["__index"]
@@ -8849,9 +8929,12 @@ do
 
         guns_ext.bindings[tool] = entry
         local_guns[handle] = entry
+    end
 
-        local_tool = tool
-        local_gun = tonumber(range)
+    -- A gun in the Backpack is still owned and still fires; only one that has
+    -- left the player (sold, dropped, destroyed) is gone.
+    function guns_ext.is_owned(tool)
+        return tool ~= nil and tool["Parent"] ~= nil and tool:IsDescendantOf(local_player)
     end
 
     function guns_ext.unbind(tool)
@@ -8959,58 +9042,69 @@ do
 
     getgenv()["juju"]["gun_handler"] = guns_ext
 
-    local on_child_added = LPH_NO_VIRTUALIZE(function(child)
-        local_parts[child["Name"]] = child
-        if child["ClassName"] == "Tool" then
-            -- Tool children (Handle, Ammo) can replicate a frame after the Tool
-            -- itself, so retry the bind on ChildAdded until both land.
-            local try_bind = LPH_NO_VIRTUALIZE(function()
-                local handle = guns_ext.find_handle(child)
+    -- Binds one Tool wherever it lives: a gun can be in the character (held)
+    -- or in the Backpack, and both are tracked so a burst can fire every
+    -- owned gun instead of only the one in hand.
+    local bind_tool = LPH_NO_VIRTUALIZE(function(child)
+        if not child or child["ClassName"] ~= "Tool" then
+            return
+        end
 
-                if not handle then
-                    return
-                end
+        -- Tool children (Handle, Ammo) can replicate a frame after the Tool
+        -- itself, so retry the bind on ChildAdded until both land.
+        local try_bind = LPH_NO_VIRTUALIZE(function()
+            local handle = guns_ext.find_handle(child)
 
-                local first = guns_ext.bindings[child] == nil
+            if not handle then
+                return
+            end
 
-                guns_ext.bind(child, handle, ammo_signal)
-
-                local entry = guns_ext.bindings[child]
-
-                if not entry then
-                    return
-                end
-
-                if first then
-                    local_tool = child
-
-                    signals["on_local_tool_equipped"]:Fire(child)
-                end
-
-                if entry[3] ~= nil then
-                    local retry = guns_ext.retries[child]
-
-                    if retry then
-                        retry:Disconnect()
-                        guns_ext.retries[child] = nil
-                    end
-                end
-            end)
-
-            try_bind()
+            guns_ext.bind(child, handle, ammo_signal)
 
             local entry = guns_ext.bindings[child]
 
-            if child["Parent"] == local_character and (not entry or entry[3] == nil) then
+            if not entry then
+                return
+            end
+
+            -- The held tool is the one on the character. A gun bound while it
+            -- sits in the Backpack is not held, and re-equipping one already
+            -- bound still announces it.
+            if child["Parent"] == local_character and local_tool ~= child then
+                local_tool = child
+                local_gun = tonumber(entry[2])
+
+                signals["on_local_tool_equipped"]:Fire(child)
+            end
+
+            if entry[3] ~= nil then
                 local retry = guns_ext.retries[child]
 
                 if retry then
                     retry:Disconnect()
+                    guns_ext.retries[child] = nil
                 end
-
-                guns_ext.retries[child] = create_connection(child["ChildAdded"], try_bind)
             end
+        end)
+
+        try_bind()
+
+        local entry = guns_ext.bindings[child]
+
+        if guns_ext.is_owned(child) and (not entry or entry[3] == nil) then
+            local retry = guns_ext.retries[child]
+
+            if retry then
+                retry:Disconnect()
+            end
+
+            guns_ext.retries[child] = create_connection(child["ChildAdded"], try_bind)
         end
+    end)
+
+    local on_child_added = LPH_NO_VIRTUALIZE(function(child)
+        local_parts[child["Name"]] = child
+        bind_tool(child)
     end)
 
     local on_child_removed = LPH_NO_VIRTUALIZE(function(child)
@@ -9018,7 +9112,12 @@ do
         if child["ClassName"] == "Tool" then
             signals["on_local_tool_equipped"]:Fire(false, child)
 
-            guns_ext.unbind(child)
+            -- Moving a tool to the Backpack is an unequip, not a loss: the gun
+            -- keeps its binding and can fire from there. Only a tool that left
+            -- the player is unbound.
+            if not guns_ext.is_owned(child) then
+                guns_ext.unbind(child)
+            end
 
             local remaining = nil
 
@@ -9031,16 +9130,39 @@ do
                 end
             end
 
-            if not remaining then
-                for _, entry in local_guns do
-                    remaining = entry
-                    break
-                end
-            end
-
             local_gun = remaining and tonumber(remaining[2]) or nil
             local_tool = remaining and remaining[5] or nil
         end
+    end)
+
+    -- Every gun in the Backpack is bound too, so the burst can fire the ones
+    -- that are not in hand from where they sit.
+    local backpack_connections = {}
+
+    local refresh_gun_backpack_connections = LPH_NO_VIRTUALIZE(function()
+        for i = 1, #backpack_connections do
+            backpack_connections[i]:Disconnect()
+        end
+
+        backpack_connections = {}
+
+        local backpack = wait_for_child(local_player, "Backpack", 5)
+
+        if not backpack then
+            return
+        end
+
+        local children = get_children(backpack)
+        for i = 1, #children do
+            bind_tool(children[i])
+        end
+
+        backpack_connections[#backpack_connections+1] = create_connection(backpack["ChildAdded"], bind_tool)
+        backpack_connections[#backpack_connections+1] = create_connection(backpack["ChildRemoved"], function(child)
+            if child["ClassName"] == "Tool" and not guns_ext.is_owned(child) then
+                guns_ext.unbind(child)
+            end
+        end)
     end)
 
     local on_character_added = LPH_NO_VIRTUALIZE(function(character)
@@ -9081,6 +9203,8 @@ do
 
         wait_for_child(character, "Head", 5)
 
+        local_character = character
+
         local children = get_children(character)
         for i = 1, #children do
             local child = children[i]
@@ -9094,7 +9218,7 @@ do
         create_connection(character["ChildAdded"], on_child_added)
         create_connection(character["ChildRemoved"], on_child_removed)
 
-        local_character = character
+        refresh_gun_backpack_connections()
 
         signals["on_local_character_added"]:Fire(1)
 
@@ -9700,6 +9824,7 @@ do
     local position = nil
     local detector = nil
     local is_ammo = false
+    local purchase_clicked = false
 
     local purchase_function = nil; purchase_function = LPH_JIT_MAX(function(dt, hrp)
         local stop = false
@@ -9737,30 +9862,80 @@ do
         local skip = purchasing and purchasing[6]:find("armor") or not purchasing
         
         if not stop and (didnt_buy and hrp and clock() - start_time < (local_reloading and 2 + ping * 2 or ping*2 + purchase_count*0.36) and (not is_ammo or not local_reloading)) then
-            if not skip then
-                local backpack = find_first_child(local_player, "Backpack")
+            -- One click per attempt. The click is the only thing that has to
+            -- happen; what is left of the window is the wait for the cash to
+            -- change. Repeating the hop every frame, which is what this did,
+            -- kept the body moving to the shop and back for the whole window -
+            -- a quarter of a second of a character that cannot walk, once per
+            -- attempt, forever while the shop is refusing.
+            if not purchase_clicked then
+                purchase_clicked = true
 
-                for gun, data in local_guns do
-                    local gun = gun["Parent"]
+                if not skip then
+                    local backpack = find_first_child(local_player, "Backpack")
 
-                    if backpack and gun and gun["Parent"] == local_character then
-                        setscriptable(gun, "Parent", true)
-                        gun["Parent"] = backpack
+                    for gun, data in local_guns do
+                        local gun = gun["Parent"]
+
+                        if backpack and gun and gun["Parent"] == local_character then
+                            setscriptable(gun, "Parent", true)
+                            gun["Parent"] = backpack
+                        end
                     end
                 end
+
+                local old_cframe, old_linear_velocity, old_angular_velocity, old_velocity = save_body(hrp)
+
+                -- Only a body that is not already standing under the sign is
+                -- moved. Standing at the shop is the normal case for a player
+                -- buying by hand, and hopping the body 8.8 studs up and back
+                -- under it is a movement the character has to recover from for
+                -- nothing.
+                local move = not in_void and position ~= nil and (hrp["Position"] - position)["Magnitude"] > 12
+
+                if move then
+                    hrp["CFrame"] = cframe_new(position - vector3_new(0,8.8,0))
+                end
+
+                if detector then
+                    -- The detector checks where the server has the body, so the
+                    -- body goes to the shop first and the click follows once the
+                    -- position has had a step to reach it. Clicking first, which
+                    -- is what this did, sent every purchase from wherever the
+                    -- character really stood and the shop turned it down - the
+                    -- endless "failed to purchase" line.
+                    if move then
+                        heartbeat_wait(heartbeat_signal)
+                        heartbeat_wait(heartbeat_signal)
+                    end
+
+                    -- The click is the one call here that can throw: a shop
+                    -- destroyed between the attempt and this frame leaves a
+                    -- dead detector. Guarded so the body is put back whatever
+                    -- happens - an error between the hop and the restore is a
+                    -- character left parked under a shop sign for the rest of
+                    -- the round, which is the stuck the shop was causing.
+                    pcall(fireclickdetector, detector)
+                end
+
+                if move then
+                    -- The frame goes back, and the three velocities go with it. A
+                    -- purchase puts the body 8.8 studs above the shop, and the
+                    -- steps in between leave a solve behind; a body that keeps it
+                    -- walks off carrying the shop's floor instead of the one it
+                    -- stands on. Auto armor and auto ammo both buy here.
+                    hrp["CFrame"] = old_cframe
+                    hrp["Velocity"] = old_velocity
+                    hrp["AssemblyLinearVelocity"] = old_linear_velocity
+                    hrp["AssemblyAngularVelocity"] = old_angular_velocity
+                end
             end
-
-            fireclickdetector(detector)
-            local old_cframe = hrp["CFrame"]
-
-            if not in_void then
-                hrp["CFrame"] = cframe_new(position - vector3_new(0,8.8,0))
-            end
-
-            render_stepped_wait(render_stepped)
-            hrp["CFrame"] = old_cframe
         else
             local old_purchasing = purchasing
+
+            if local_bought_count < new_bought_count then
+                last_purchase_failed = clock()
+            end
 
             spawn(function()
                 wait(local_ping/250)
@@ -9818,6 +9993,7 @@ do
             )
 
             start_time = clock()
+            purchase_clicked = false
             local found = false
 
             for i = 1, #anti_aim do
@@ -9833,7 +10009,13 @@ do
             purchasing = shop
             old_equipped = {local_tool}
             for gun, data in local_guns do
-                old_equipped[#old_equipped+1] = gun["Parent"]
+                local tool = data[5] or gun["Parent"]
+
+                -- Only the tools that were on the character are put back on it
+                -- after the purchase; a gun in the Backpack stays there.
+                if tool and tool["Parent"] == local_character then
+                    old_equipped[#old_equipped+1] = tool
+                end
             end
 
             if not found then
@@ -10945,7 +11127,20 @@ do
             end
 
             if local_tool and local_tool["Parent"] == local_character then
-                return guns_ext.find_handle(local_tool)
+                local handle = local_tool:FindFirstChild("Handle") or local_tool:FindFirstChild("GunHandle")
+
+                if not handle then
+                    for _, child in local_tool:GetChildren() do
+                        if child:IsA("BasePart") then
+                            handle = child
+                            break
+                        end
+                    end
+                end
+
+                if handle and handle:IsA("BasePart") then
+                    return handle
+                end
             end
         end
 
@@ -11212,7 +11407,10 @@ do
         for handle, data in local_guns do
             local tool = data[5] or handle["Parent"]
 
-            if tool and reload_tool(tool, data) then
+            -- Only a gun on the character can take a reload; one in the
+            -- Backpack is not the held tool and the remote has nothing to do
+            -- with it.
+            if tool and tool["Parent"] == local_character and reload_tool(tool, data) then
                 reloaded = true
                 wait(0.05)
             end
@@ -11231,7 +11429,7 @@ do
         for handle, data in local_guns do
             local tool = data[5] or handle["Parent"]
 
-            if tool then
+            if tool and tool["Parent"] == local_character then
                 local ammo = tonumber(data[3])
                 local empty = ammo == nil or ammo <= 0
 
@@ -12193,17 +12391,19 @@ do
                                     event:FireServer("Grabbing")
                                 end
 
-                                local old_cframe = hrp["CFrame"]
+                                local old_cframe, old_linear_velocity, old_angular_velocity, old_velocity = save_body(hrp)
+
                                 if not last_position then
                                     last_position = old_cframe
                                 end
 
-                                local old_velocity = hrp["Velocity"]
                                 hrp["Velocity"] = vector3_zero
                                 hrp["CFrame"] = torso["CFrame"] + auto_save_offset
                                 render_stepped_wait(render_stepped)
 
                                 hrp["Velocity"] = old_velocity
+                                hrp["AssemblyLinearVelocity"] = old_linear_velocity
+                                hrp["AssemblyAngularVelocity"] = old_angular_velocity
                                 hrp["CFrame"] = old_cframe
 
                                 return
@@ -13357,6 +13557,7 @@ end
         menu_references["drawing_crosshair_follow_target"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "follow target"}, {["toggle"] = {["flag"] = "drawing_crosshair_follow_target"}})
         menu_references["drawing_crosshair_animation"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "animation style"}, {["dropdown"] = {["flag"] = "drawing_crosshair_animation", ["requires_one"] = true, ["options"] = {"expand", "spiral", "glitch", "ripple", "none"}, ["default"] = {"none"}}})
         menu_references["drawing_crosshair_animation_speed"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "speed"}, {["slider"] = {["flag"] = "drawing_crosshair_animation_speed", ["min"] = 1, ["max"] = 100, ["suffix"] = "%"}})
+        menu_references["drawing_crosshair_lerp"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "lerp"}, {["slider"] = {["flag"] = "drawing_crosshair_lerp", ["min"] = 1, ["max"] = 100, ["suffix"] = "%", ["default"] = 27, ["min_text"] = "smooth", ["max_text"] = "instant"}})
         menu_references["drawing_crosshair_target_outline_color"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "target outline color"}, {["colorpicker"] = {["color_flag"] = "drawing_crosshair_target_outline_color", ["default_color"] = color3_fromrgb(193, 222, 222), ["default_transparency"] = 0, ["transparency_flag"] = "drawing_crosshair_target_outline_transparency"}})
         menu_references["drawing_crosshair_target_line_color"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "target line color"}, {["colorpicker"] = {["color_flag"] = "drawing_crosshair_target_line_color", ["default_color"] = color3_fromrgb(193, 222, 222), ["default_transparency"] = 0, ["transparency_flag"] = "drawing_crosshair_target_line_transparency"}})
         menu_references["drawing_crosshair_outline_color"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "outline color"}, {["colorpicker"] = {["color_flag"] = "drawing_crosshair_outline_color", ["default_color"] = color3_fromrgb(15, 15, 15), ["default_transparency"] = 0, ["transparency_flag"] = "drawing_crosshair_outline_transparency"}})
@@ -13765,6 +13966,7 @@ end
         local rotation = 0
         local thickness = 2
         local animation_speed = 1
+        local lerp_alpha = (flags["drawing_crosshair_lerp"] or 27) / 100
 
         local old_position = nil
         local animation = "none"
@@ -13794,7 +13996,11 @@ end
                 old_position = new_position
             end
     
-            local position = old_position + (new_position - old_position) * dt * 16
+            -- The slider is the share of the distance covered in one 60 fps
+            -- frame: 100% snaps the crosshair to the mouse/target, lower values
+            -- glide it there. dt keeps the glide the same at any frame rate.
+            local alpha = lerp_alpha >= 1 and 1 or clamp(dt * 60 * lerp_alpha, 0, 1)
+            local position = old_position + (new_position - old_position) * alpha
             local px = position["X"]
             local py = position["Y"]
 
@@ -14043,6 +14249,10 @@ end
 
         create_connection(menu_references["drawing_crosshair_animation_speed"]["on_slider_change"], function(value)
             animation_speed = value/100
+        end)
+
+        create_connection(menu_references["drawing_crosshair_lerp"]["on_slider_change"], function(value)
+            lerp_alpha = value/100
         end)
 
         create_connection(menu_references["drawing_crosshair_line_thickness"]["on_slider_change"], function(value)
@@ -22167,6 +22377,15 @@ local backtrack_data = {}
     local target_cooldown = flags["target_selection_cooldown"]
     local auto_fire_always_fire = flags["auto_fire_always_fire"]
 
+    -- A burst fires every bound gun from wherever the gun is. Nothing is moved:
+    -- a tool in the Backpack keeps its binding (on_child_removed says so) and
+    -- the shot goes out with that gun's own handle, which is all the fire loop
+    -- below asks for. Parenting the tools onto the character first is what put
+    -- every gun in hand the moment a target was picked - with the auto equip
+    -- option off, since the burst never asked it - and a tool left on the
+    -- character is welded there by the game, one more after every burst, until
+    -- the hand is full and the character cannot move.
+
     local target_changed_signal = signals["on_ragebot_target_changed"]
     local defensive_positions = {}
     local void_spam_resolver_accuracy = 1.35
@@ -22536,9 +22755,10 @@ local backtrack_data = {}
                     end
                 end
             
+                local had_custom_aim = custom_ragebot_aim_position ~= nil
                 ragebot_aim_position = ragebot_force_position or ragebot_aim_position
 
-                if custom_ragebot_aim_position then
+                if had_custom_aim then
                     ragebot_aim_position = custom_ragebot_aim_position
                     custom_ragebot_aim_position = nil
                 end
@@ -22556,80 +22776,116 @@ local backtrack_data = {}
                 ragebot_aim_velocity = target_velocity
                 ragebot_aim_defensive = did_defensive
 
-                -- No distance gate. The trigger is pulled at any range; the shot
-                -- is what reaches or does not, and the manipulation can move the
-                -- origin onto the target from anywhere.
+                -- A gun has to be in hand before the burst runs, exactly as
+                -- antistuck.lua has it. Every bound gun still fires - a gun in
+                -- the Backpack keeps its binding and its own handle - but with
+                -- nothing equipped the shot is not sent at all, which is the
+                -- state the game reads as firing without a weapon.
                 if local_gun and (((not local_reloading or auto_fire_always_fire) and not target[18] and not target[7] and not spawn_guard["check"](target) and not grabbing_constraint) and (flags["auto_fire"] and (auto_fire_always_fire or (((local_server_position-ragebot_aim_position)["Magnitude"] > 0) or flags["follow_target"] or did_defensive)) and old_time-last_fire > fire_cooldown)) then
                     local delay = flags["shot_delay"]
                     if delay > 0 then
                         wait(delay/1000)
                     end
 
-                    if local_gun then
-                        local new_local_guns = {}
-                        for handle, local_gun in local_guns do
-                            local parent = handle["Parent"]
+                    local pos = ragebot_aim_position
+                    local origin = local_server_position
+                    local fire_hitbox = hitbox
 
-                            if parent and parent["Name"] == "[Rifle]" then
-                                new_local_guns[#new_local_guns+1] = local_gun
+                    if ragebot_manipulation then
+                        pos = ragebot_manipulation["position"]
+                        origin = ragebot_manipulation["origin"] or origin
+                        fire_hitbox = ragebot_manipulation["part"]
+                    elseif not did_defensive and not confidence_mode and not ragebot_force_position and not had_custom_aim and not flags["auto_fire_at_backtrack"] and hitbox and hitbox["Parent"] then
+                        -- The solve above belongs to the frame the trigger was
+                        -- checked on, and the shot delay may have yielded on top
+                        -- of that. Re-read the limb and lay the same lead over
+                        -- it so the burst lands where the target is at the
+                        -- trigger, not where it was when the frame was solved.
+                        -- The solver's invented points are not target positions
+                        -- and are left exactly as they are.
+                        pos = hitbox["Position"]
+
+                        -- The aimed limb's own velocity leads a strafing or
+                        -- falling target more closely than the root's average
+                        -- does; the root's is the fallback when the limb has
+                        -- none to give.
+                        local lead = prediction == 0 and local_ping/500 or prediction == 2 and 0 or prediction
+                        local lead_velocity = hitbox["AssemblyLinearVelocity"] or target_velocity
+
+                        if lead_velocity and lead > 0 then
+                            pos += lead_velocity * lead
+                        end
+
+                        ragebot_aim_position = pos
+                    end
+
+                    local new_local_guns = {}
+                    for handle, local_gun in local_guns do
+                        local parent = handle["Parent"]
+
+                        if parent and parent["Name"] == "[Rifle]" then
+                            new_local_guns[#new_local_guns+1] = local_gun
+                        end
+                    end
+                    for handle, local_gun in local_guns do
+                        local parent = handle["Parent"]
+
+                        if parent and parent["Name"] ~= "[Rifle]" then
+                            new_local_guns[#new_local_guns+1] = local_gun
+                        end
+                    end
+
+                    -- The muzzle the shot is reported from, for the range check.
+                    local shot_origin = origin
+                    local manip_origin = ragebot_manipulation and ragebot_manipulation["origin"]
+
+                    if manip_origin then
+                        shot_origin = manip_origin
+                    end
+
+                    local reach = (pos - shot_origin)["Magnitude"]
+
+                    for i = 1, #new_local_guns do
+                        local entry = new_local_guns[i]
+                        local handle = entry[1]
+                        local ammo = tonumber(entry[3])
+                        local range = tonumber(entry[2])
+
+                        -- A gun that cannot reach the aim point has no shot to
+                        -- give: sending it only spends the packet and the clip.
+                        -- A missing range is unknown, not zero.
+                        local in_range = range == nil or range <= 0 or reach <= range
+
+                        -- An unread ammo value is unknown, not empty: fire and
+                        -- let the server reject the shot if the clip is dry.
+                        if in_range and (ammo == nil or ammo > 0) and handle and handle["Parent"] and not spawn_guard["check"](target) then
+                            last_fire = clock()
+
+                            if shoot and not flags["auto_fire_dont_render"] then
+                                setthreadidentity(8)
+                                pcall(function()
+                                    local env = getfenv(shoot)
+                                    env["require"] = require
+                                    shoot({
+                                        Shooter = local_character,
+                                        Handle = handle,
+                                        ForcedOrigin = origin,
+                                        AimPosition = pos,
+                                        BeamColor = color3_fromrgb(1, 0.545098, 0.14902),
+                                        Range = range or 1000
+                                    })
+                                    env["require"] = nil
+                                end)
+                                setthreadidentity(4)
                             end
-                        end
-                        for handle, local_gun in local_guns do
-                            local parent = handle["Parent"]
 
-                            if parent and parent["Name"] ~= "[Rifle]" then
-                                new_local_guns[#new_local_guns+1] = local_gun
-                            end
-                        end
-
-                        local pos = ragebot_aim_position
-                        local origin = local_server_position
-                        local fire_hitbox = hitbox
-
-                        if ragebot_manipulation then
-                            pos = ragebot_manipulation["position"]
-                            origin = ragebot_manipulation["origin"] or origin
-                            fire_hitbox = ragebot_manipulation["part"]
-                        end
-
-                        for i = 1, #new_local_guns do
-                            local entry = new_local_guns[i]
-                            local handle = entry[1]
-                            local ammo = tonumber(entry[3])
-
-                            -- An unread ammo value is unknown, not empty: fire and
-                            -- let the server reject the shot if the clip is dry.
-                            if (ammo == nil or ammo > 0) and handle and handle["Parent"] and not spawn_guard["check"](target) then
-                                last_fire = clock()
-
-                                if shoot and not flags["auto_fire_dont_render"] then
-                                    setthreadidentity(8)
-                                    pcall(function()
-                                        local env = getfenv(shoot)
-                                        env["require"] = require
-                                        shoot({
-                                            Shooter = local_character,
-                                            Handle = handle,
-                                            ForcedOrigin = origin,
-                                            AimPosition = pos,
-                                            BeamColor = color3_fromrgb(1, 0.545098, 0.14902),
-                                            Range = tonumber(entry[2]) or 1000
-                                        })
-                                        env["require"] = nil
-                                    end)
-                                    setthreadidentity(4)
-                                end
-
-                                local dir = (pos-origin)
-                                local Magnitude = dir["Magnitude"]
-                                
-                                for i = 1, ragebot_force_position and 2 or 1 do
-                                    ragebot_firing_shot = true
-                                    event:FireServer("ShootGun", handle, origin, pos, fire_hitbox, (Magnitude <= 0 or Magnitude ~= Magnitude) and ((handle["Position"])-pos)["Unit"] or dir)
-                                    ragebot_firing_shot = false
-                                end
-
-                                spawn(get_bullet_result, target[2], fire_hitbox, origin, pos, target_velocity, did_defensive)
+                            local dir = (pos-origin)
+                            local Magnitude = dir["Magnitude"]
+                            
+                            for i = 1, ragebot_force_position and 2 or 1 do
+                                ragebot_firing_shot = true
+                                event:FireServer("ShootGun", handle, origin, pos, fire_hitbox, (Magnitude <= 0 or Magnitude ~= Magnitude) and ((handle["Position"])-pos)["Unit"] or dir)
+                                ragebot_firing_shot = false
                             end
                         end
                     end
@@ -23049,8 +23305,11 @@ local backtrack_data = {}
         local height = vector3_zero
 
         local function do_void_while_waiting(hrp)
-            local old_cframe = hrp["CFrame"]
-            local old_velocity = hrp["Velocity"]
+            -- The same void hop as the hide: the part goes out for the step the
+            -- server samples and comes home before the frame is drawn, with the
+            -- three velocities it left with. The client keeps its own body; the
+            -- server keeps the void.
+            local old_cframe, old_linear_velocity, old_angular_velocity, old_velocity = save_body(hrp)
 
             in_void = true
             hrp["Velocity"] = vector3_zero
@@ -23058,6 +23317,8 @@ local backtrack_data = {}
             render_stepped_wait(render_stepped)
             hrp["CFrame"] = old_cframe
             hrp["Velocity"] = old_velocity
+            hrp["AssemblyLinearVelocity"] = old_linear_velocity
+            hrp["AssemblyAngularVelocity"] = old_angular_velocity
         end
 
         local follow_target = LPH_JIT_MAX(function(dt, hrp, bypass)
@@ -23081,7 +23342,7 @@ local backtrack_data = {}
                     return
                 end
 
-                local old_cframe = hrp["CFrame"]
+                local old_cframe, old_linear_velocity, old_angular_velocity, old_velocity = save_body(hrp)
                 local new_cframe = old_cframe
 
                 if follow_target_style == "random" then
@@ -23110,9 +23371,20 @@ local backtrack_data = {}
                     return new_cframe
                 end
 
+                -- Follow has to move the body: the shot is fired from where the
+                -- character really stands, and a read spoof would leave it at
+                -- home while the target's position is only something the local
+                -- scripts read. The frame goes to the follow position for the
+                -- render step and comes straight back, and the assembly pair is
+                -- put back with it - the step in between solves at the target,
+                -- and the velocity it lands on is what the body keeps after the
+                -- frame is home again.
                 hrp["CFrame"] = new_cframe
                 render_stepped_wait(render_stepped)
                 hrp["CFrame"] = old_cframe
+                hrp["Velocity"] = old_velocity
+                hrp["AssemblyLinearVelocity"] = old_linear_velocity
+                hrp["AssemblyAngularVelocity"] = old_angular_velocity
             else
                 local_following = false
             end
@@ -23622,10 +23894,13 @@ local backtrack_data = {}
 
                         local new_function = function(dt)
                             if hrp then
-                                local old = hrp["CFrame"]
+                                local old, old_linear_velocity, old_angular_velocity, old_velocity = save_body(hrp)
                                 hrp["CFrame"] = cframe_new(vector3_new(math_random(-100000, 100000), math_random(-400, 100000), math_random(-100000, 100000)))
                                 render_stepped_wait(render_stepped)
                                 hrp["CFrame"] = old
+                                hrp["Velocity"] = old_velocity
+                                hrp["AssemblyLinearVelocity"] = old_linear_velocity
+                                hrp["AssemblyAngularVelocity"] = old_angular_velocity
                             end
                         end
                         
@@ -23669,7 +23944,13 @@ local backtrack_data = {}
 
     local do_auto_armor = LPH_JIT_MAX(function(dt, hrp)
         local tick = clock()
-        if (local_armor < threshold and not local_knocked) and (tick-last_attempt > cooldown) then
+        -- A shop that turned the last attempt down is not asked again on the
+        -- next tick. Every attempt is a hop to the armor sign and back, so a
+        -- refusal that repeats every 0.05 seconds is a character that never
+        -- gets to walk anywhere: it is put back under the sign before its own
+        -- physics can carry it. The stand-off is what leaves the body alone
+        -- between attempts.
+        if (local_armor < threshold and not local_knocked and not purchasing) and (tick-last_attempt > cooldown) and (tick-last_purchase_failed > 2) then
             last_attempt = tick
             if local_cash > 5000 then
                 purchase_item("high-medium armor")
@@ -24432,6 +24713,13 @@ local backtrack_data = {}
                 return
             end
 
+            -- Same stand-off as auto armor: a refused ammo purchase is a hop to
+            -- the shop, and asking again on the very next frame holds the body
+            -- there for as long as the shop keeps refusing.
+            if clock() - last_purchase_failed <= 2 then
+                return
+            end
+
             local amount = flags["auto_ammo_purchase_amount"]
 
             for _, data in local_guns do
@@ -24519,7 +24807,7 @@ local backtrack_data = {}
                     end
                 end
 
-                local old = hrp["CFrame"]
+                local old, old_linear_velocity, old_angular_velocity, old_velocity = save_body(hrp)
                 local found_target = false
                 for _, target in targets do
                     local torso = target[4]["UpperTorso"]
@@ -24529,7 +24817,6 @@ local backtrack_data = {}
 
                         if not target[4]["GRABBING_CONSTRAINT"] and (not auto_stomp_stop_when_dead or not target[7]) and target[18] and torso and velocity["Magnitude"] < 100 then
                             local new_cframe = old
-                            local old_velocity = hrp["Velocity"]
 
                             new_cframe = cframe_new(torso["Position"] + auto_stomp_offset)
 
@@ -24549,10 +24836,21 @@ local backtrack_data = {}
 
                             if tick - auto_stomp_tick > 0.025 then
                                 auto_stomp_tick = tick
-                                event:FireServer("Stomp")
+
+                                -- The stomp has to be sent while the body is on
+                                -- the target, and the restore below has to run
+                                -- whatever the send does. A remote that throws
+                                -- here - the event gone, a hook around it
+                                -- erroring - used to leave the character on top
+                                -- of the target with its velocity at zero.
+                                pcall(function()
+                                    event:FireServer("Stomp")
+                                end)
                             end
 
                             hrp["Velocity"] = old_velocity
+                            hrp["AssemblyLinearVelocity"] = old_linear_velocity
+                            hrp["AssemblyAngularVelocity"] = old_angular_velocity
                             hrp["CFrame"] = old
                             break
                         end
@@ -24699,7 +24997,7 @@ local backtrack_data = {}
         }
 
         local new_cframe = cframe_new()
-        
+
         local do_void_hide = LPH_JIT_MAX(function(dt, hrp)
             local humanoid = local_parts["Humanoid"]
 
@@ -24725,10 +25023,16 @@ local backtrack_data = {}
             end
 
             if hrp and not ragebot_force_position then
-                local old_cframe = hrp["CFrame"]
-                local old_velocity = hrp["Velocity"]
-                local old_linear_velocity = hrp["AssemblyLinearVelocity"]
-                local old_angular_velocity = hrp["AssemblyAngularVelocity"]
+                -- The part is written for real - the server has to see the void
+                -- for the hide to hide anything - and the client is put back
+                -- before the frame is drawn. That restore is the spoof that
+                -- only the client gets: the server keeps the void, this body
+                -- keeps its own frame and its own three velocities, so the
+                -- client's controller is never left solving out there. Losing
+                -- this restore is the character that stands stuck after a hide
+                -- with a perfectly normal walk speed.
+                local old_cframe, old_linear_velocity, old_angular_velocity, old_velocity = save_body(hrp)
+
                 in_void = true
                 local tick = clock()
                 local do_void_hide = not ragebot_force_position or math_random(1,10) == 1
@@ -24818,7 +25122,14 @@ local backtrack_data = {}
                 if not in_void then
                     hrp["CFrame"] = (old_cframe + vector3_new(math_random(-void_hide_offset, void_hide_offset), math_random(-void_hide_offset, void_hide_offset), math_random(-void_hide_offset, void_hide_offset)))*cframe_angles(rad(math_random(1,359)), rad(math_random(1,359)), rad(math_random(1,359)))
                 end
+
                 render_stepped_wait(render_stepped)
+
+                -- The way home: the frame the body really stands on, then the
+                -- three velocities that belong with it, in the order the
+                -- original shipped them. The physics step in between solved at
+                -- the void, and whatever velocity it produced is replaced here
+                -- rather than carried.
                 hrp["CFrame"] = old_cframe
                 hrp["Velocity"] = old_velocity
                 hrp["AssemblyLinearVelocity"] = old_linear_velocity
@@ -27303,6 +27614,39 @@ do
             local_client_position = hrp["CFrame"]
         end
 
+        local root = local_parts["HumanoidRootPart"]
+
+        if root then
+            local frame = root["CFrame"]
+
+            if frame_in_bounds(frame) then
+                home_frame = frame
+                home_velocity = root["Velocity"]
+                home_linear_velocity = root["AssemblyLinearVelocity"]
+                home_angular_velocity = root["AssemblyAngularVelocity"]
+                out_of_bounds_since = 0
+            elseif home_frame then
+                local humanoid = local_parts["Humanoid"]
+
+                -- A body that has been outside the map for half a second is not
+                -- in a hop any more - a hop is one render step - and nothing is
+                -- left that is going to bring it back. Knocked and stomping
+                -- bodies are left alone: the anti-stomp puts the body out on
+                -- purpose and the respawn is what returns it.
+                if (not local_knocked and not stomping and not vehicle and not ragebot_force_position) and (not humanoid or humanoid["Health"] > 0) then
+                    if out_of_bounds_since == 0 then
+                        out_of_bounds_since = clock()
+                    elseif clock() - out_of_bounds_since > 0.5 then
+                        out_of_bounds_since = 0
+                        root["CFrame"] = home_frame
+                        root["Velocity"] = home_velocity or vector3_zero
+                        root["AssemblyLinearVelocity"] = home_linear_velocity or vector3_zero
+                        root["AssemblyAngularVelocity"] = home_angular_velocity or vector3_zero
+                    end
+                end
+            end
+        end
+
         for i = 1, #anti_aim do
             local func = anti_aim[i]
             if func then
@@ -27941,10 +28285,13 @@ do
                     return
                 end
 
-                local old = hrp["CFrame"]
+                local old, old_linear_velocity, old_angular_velocity, old_velocity = save_body(hrp)
                 hrp["CFrame"] = cf
                 render_stepped_wait(render_stepped)
                 hrp["CFrame"] = old
+                hrp["Velocity"] = old_velocity
+                hrp["AssemblyLinearVelocity"] = old_linear_velocity
+                hrp["AssemblyAngularVelocity"] = old_angular_velocity
             end
 
             anti_aim[#anti_aim+1] = new_function
@@ -28898,41 +29245,133 @@ end)
             create_connection(player_gui["DescendantAdded"], watch_label)
         end
 
-        -- Watch the Reporters folder where Da Hood sends report data to the client.
-        -- The detector was watching remotes (DescendantAdded), PlayerGui text and chat
-        -- but not this primary signal, so nothing was ever detected.
-        local reporters = replicated_storage:FindFirstChild("Reporters")
-
-        if not reporters then
-            -- Try periodically; the folder may appear later.
-            local try_count = 0
-            while not reporters and try_count < 10 do
-                wait(1)
-                if not flags["anti_report"] then
-                    break
-                end
-                reporters = replicated_storage:FindFirstChild("Reporters")
-                try_count = try_count + 1
-            end
-        end
-
-        if reporters then
-            -- Every Report in the folder is a StringValue whose Value is the
-            -- reporter's name or a keyword.
-            for _, report in reporters:GetChildren() do
-                if report:IsA("StringValue") then
-                    on_reported("report:" .. report.Name, report.Value)
-                end
-            end
-
-            create_connection(reporters.ChildAdded, function(report)
-                if report:IsA("StringValue") then
-                    on_reported("report:" .. report.Name, report.Value)
-                end
-            end)
-        end
-
+        -- Da Hood writes report entries into the local player's own
+        -- DataFolder.Reporters, not into ReplicatedStorage. Each entry is a
+        -- ValueBase whose name/value changes when a report lands. The folder
+        -- is polled because it appears only after the data folder loads, and
+        -- the entries already in it when the watcher starts are the baseline:
+        -- only a new entry or a changed name/value is a report. This is the
+        -- same test the report watcher in moonlol uses.
         state["baseline"] = false
+
+        local report_folder = nil
+        local report_entries = {}
+        local report_connections = {}
+
+        local report_key = function(entry)
+            local ok, value = pcall(function()
+                return entry["Value"]
+            end)
+
+            return tostring(entry["Name"]) .. ":" .. (ok and tostring(value) or "")
+        end
+
+        local report_changed = function(entry, tracked)
+            if report_entries[entry] ~= tracked then
+                return
+            end
+
+            if entry["Parent"] ~= report_folder then
+                return
+            end
+
+            local key = report_key(entry)
+
+            if tracked["last"] ~= key then
+                tracked["last"] = key
+                on_reported("report:" .. tostring(entry["Name"]), key)
+            end
+        end
+
+        local untrack_report = function(entry)
+            local tracked = report_entries[entry]
+
+            if not tracked then
+                return
+            end
+
+            for _, connection in tracked["connections"] do
+                connection:Disconnect()
+            end
+
+            report_entries[entry] = nil
+        end
+
+        local track_report = function(entry, fire_now)
+            if report_entries[entry] then
+                return
+            end
+
+            local tracked = {
+                ["last"] = report_key(entry),
+                ["connections"] = {}
+            }
+
+            report_entries[entry] = tracked
+
+            tracked["connections"][#tracked["connections"]+1] = create_connection(entry:GetPropertyChangedSignal("Name"), function()
+                report_changed(entry, tracked)
+            end)
+
+            if entry:IsA("ValueBase") then
+                tracked["connections"][#tracked["connections"]+1] = create_connection(entry:GetPropertyChangedSignal("Value"), function()
+                    report_changed(entry, tracked)
+                end)
+            end
+
+            if fire_now then
+                on_reported("report:" .. tostring(entry["Name"]), tracked["last"])
+            end
+        end
+
+        local set_report_folder = function(folder)
+            if folder == report_folder then
+                return
+            end
+
+            for entry in report_entries do
+                untrack_report(entry)
+            end
+
+            for _, connection in report_connections do
+                connection:Disconnect()
+            end
+
+            report_connections = {}
+            report_folder = folder
+
+            if not folder then
+                return
+            end
+
+            report_connections[#report_connections+1] = create_connection(folder["ChildAdded"], function(entry)
+                track_report(entry, true)
+            end)
+
+            report_connections[#report_connections+1] = create_connection(folder["ChildRemoved"], untrack_report)
+
+            -- Entries already there are the baseline, not a new report.
+            for _, entry in folder:GetChildren() do
+                track_report(entry, false)
+            end
+        end
+
+        task.spawn(function()
+            while true do
+                local data_folder = player:FindFirstChild("DataFolder")
+                local folder = data_folder and data_folder:FindFirstChild("Reporters")
+
+                -- Older builds kept it under ReplicatedStorage; the fallback
+                -- still finds a folder that moved.
+                if not folder then
+                    folder = replicated_storage:FindFirstChild("Reporters")
+                end
+
+                set_report_folder(folder)
+
+                task.wait(0.5)
+            end
+        end)
     end)
 end)()
 
