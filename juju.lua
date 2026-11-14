@@ -394,7 +394,7 @@ local menu = {
     do
         local files = {
             ["assets"] = {
-                ["api.lua"] = function() return game:HttpGet("https://raw.githubusercontent.com/shfjcjvnifs-maker/juju/main/assets/api.lua") end,
+                ["api.lua"] = function() return game:HttpGet("https://raw.githubusercontent.com/d1rtylegitness/juju/refs/heads/main/api.lua") end,
                 ["sparkle.ogg"] = function() return game:HttpGet("https://raw.githubusercontent.com/shfjcjvnifs-maker/juju/main/assets/sparkle.ogg") end,
                 ["skeet.ogg"] = function() return game:HttpGet("https://raw.githubusercontent.com/shfjcjvnifs-maker/juju/main/assets/skeet.ogg") end,
                 ["neverlose.ogg"] = function() return game:HttpGet("https://raw.githubusercontent.com/shfjcjvnifs-maker/juju/main/assets/neverlose.ogg") end,
@@ -478,102 +478,19 @@ local menu = {
     -- > ( custom drawing )
 
     local drawing = Drawing
-    local backend_note = nil
-    local loader_ok = pcall(function()
-        local function compile(source)
-            local chunk = loadstring(source)
-
-            if not chunk then
-                return nil
-            end
-
-            return chunk()
-        end
-
-        local function usable(lib)
-            return type(lib) == "table" and type(lib["new"]) == "function" and lib
-        end
-
-        -- Hosted copy first: the workspace file can be a stale or broken
-        -- extract, and a menu built on a dead lib renders nothing at all.
-        local ok, lib = pcall(function()
-            local source = game:HttpGet("https://raw.githubusercontent.com/shfjcjvnifs-maker/juju/main/assets/api.lua")
-
-            if type(source) ~= "string" or #source == 0 then
-                error("empty api.lua response")
-            end
-
-            return compile(source)
+    LPH_NO_VIRTUALIZE(function()
+        local s, result = pcall(function()
+            return loadstring(game:HttpGet("https://raw.githubusercontent.com/d1rtylegitness/juju/refs/heads/main/api.lua"))()
         end)
 
-        if ok and usable(lib) then
-            pcall(function()
-                if not isfolder("juju recode/assets") then
-                    makefolder("juju recode/assets")
-                end
-            end)
-
-            pcall(writefile, "juju recode/assets/api.lua", game:HttpGet("https://raw.githubusercontent.com/shfjcjvnifs-maker/juju/main/assets/api.lua"))
-        else
-            backend_note = "http api: " .. tostring(lib)
-        end
-
-        if not ok or not usable(lib) then
-            local local_ok, local_lib = pcall(function()
-                return compile(readfile("juju recode/assets/api.lua"))
-            end)
-
-            if local_ok and usable(local_lib) then
-                ok = true
-                lib = local_lib
-                backend_note = nil
-            elseif not backend_note then
-                backend_note = "local api: " .. tostring(local_lib)
-            end
-        end
-
-        if ok and usable(lib) then
-            drawing = lib
+        if s and result then
+            drawing = result
         else
             drawing = Drawing
-            warn("[juju] custom drawing unavailable: " .. tostring(backend_note))
         end
-    end)
-
-    if not loader_ok then
-        drawing = Drawing
-        backend_note = "loader threw"
-    end
+    end)()
 
     getgenv()["fake_drawing"] = drawing
-
-    -- IBM Plex Sans: the lib's embedded faces are Inter/Verdana/Tahoma, so the
-    -- executor's font index 2 (Plex) has no matching face until one registers.
-    do
-        local ok, err = pcall(function()
-            local lib = drawing
-
-            if type(lib) ~= "table" or type(lib["Font"]) ~= "table" or type(lib["Font"]["new"]) ~= "function" then
-                return
-            end
-
-            if lib["Font"]["Fonts"] and lib["Font"]["Fonts"]["Plex"] then
-                return
-            end
-
-            local encoded = game:HttpGet("https://raw.githubusercontent.com/shfjcjvnifs-maker/juju/main/assets/plex.b64")
-
-            if type(encoded) ~= "string" or #encoded < 10000 then
-                error("empty plex payload")
-            end
-
-            lib["Font"].new("Plex", (string.gsub(encoded, "%s", "")))
-        end)
-
-        if not ok then
-            warn("[juju] plex font unavailable: " .. tostring(err))
-        end
-    end
 
     -- > ( global menu variables )
 
@@ -8651,54 +8568,8 @@ local resolve_ragebot_hitbox_part = function(parts, flag)
     return "HumanoidRootPart"
 end
 
--- Potassium exposes Drawing in the script environment, not always through
--- getgenv(), so resolve the first backend that actually has .new.
-local resolve_drawing_backend = function(candidate)
-    if candidate == nil then
-        return nil
-    end
-
-    local ok, new = pcall(function()
-        return candidate["new"]
-    end)
-
-    if ok and type(new) == "function" then
-        return candidate
-    end
-
-    return nil
-end
-
-local real_drawing = resolve_drawing_backend(Drawing)
-    or resolve_drawing_backend(getgenv()["Drawing"])
-    or resolve_drawing_backend(getgenv()["fake_drawing"])
-
-local fake_drawing = resolve_drawing_backend(getgenv()["fake_drawing"]) or real_drawing
-
--- Executor names whose own Drawing backend is too thin to trust for ESP.
--- Potassium drops whole classes without raising: boxes and name text are created
--- fine and never appear. Project Real documents only Drawing.new plus the
--- render-property helpers, with no Font table, no per-class properties and no
--- per-object Destroy, so the same holds. Drawing2 renders on both - the menu is
--- built on it - so ESP runs on the menu backend there.
-local thin_drawing_executors = {
-    ["potassium"] = true,
-    ["real"] = true,
-    ["real executor"] = true,
-    ["projectreal"] = true,
-    ["project real"] = true,
-    ["projectrealgg"] = true
-}
-
-local executor_name = ""
-
-pcall(function()
-    executor_name = tostring(identifyexecutor()):lower()
-end)
-
-if fake_drawing and thin_drawing_executors[executor_name] then
-    real_drawing = fake_drawing
-end
+local real_drawing = getgenv()["Drawing"] or Drawing
+local fake_drawing = getgenv()["fake_drawing"] or Drawing
 
 local event = replicated_storage["MainEvent"]
 local clone = workspace["Clone"]
@@ -8718,182 +8589,32 @@ unload_lists[#unload_lists+1] = anti_aim
 
 -- > ( cheat functions )
 
--- A stub absorbs writes so a backend that rejects one class or property can
--- never take the whole ESP loop down with it.
-local drawing_stub_mt = {
-    ["__index"] = function(_, key)
-        if key == "Destroy" or key == "Remove" then
-            return function() end
-        end
-
-        if key == "TextBounds" or key == "Position" or key == "Size" or key == "Color" then
-            return key == "Color" and Color3.new(1, 1, 1) or vector2_new(0, 0)
-        end
-
-        return nil
-    end,
-    ["__newindex"] = function() end
-}
-
--- Drawing2 reads Transparency as opacity (1 = solid); the executor's Drawing reads
--- it as transparency (0 = solid). Values are written in one convention or the
--- other, so an object takes the inverter whenever its backend disagrees with the
--- caller, which keeps tween math consistent in both directions. Drawing2 is the
--- only backend that exposes a Font constructor, which is how it is told apart.
--- Project Real documents no Font table, so it reads as executor-style here. That
--- only matters when it is actually used, and the class-support probe below is
--- what decides that per class.
-local is_opacity_backend = function(backend)
-    if not backend then
-        return false
-    end
-
-    local ok, font = pcall(function()
-        return backend["Font"]
-    end)
-
-    return ok and type(font) == "table" and type(font["new"]) == "function"
-end
-
-local real_is_opacity = is_opacity_backend(real_drawing)
-local fake_is_opacity = is_opacity_backend(fake_drawing)
-
--- Both now point at Drawing2 on a thin backend, so they must agree or every ESP
--- object takes an inverter it should not have.
-if real_drawing == fake_drawing then
-    real_is_opacity = fake_is_opacity
-end
-
-local transparency_proxy_mt = {}
-
-transparency_proxy_mt["__index"] = function(self, key)
-    local target = rawget(self, "__TARGET")
-    local value = target[key]
-
-    if key == "Transparency" and type(value) == "number" then
-        return 1 - value
-    end
-
-    if type(value) == "function" then
-        return function(_, ...)
-            return value(target, ...)
-        end
-    end
-
-    return value
-end
-
-transparency_proxy_mt["__newindex"] = function(self, key, value)
-    local target = rawget(self, "__TARGET")
-
-    if key == "Transparency" and type(value) == "number" then
-        value = 1 - value
-    end
-
-    target[key] = value
-end
-
--- Which classes a backend actually renders. Executors differ: a few ship only
--- Square/Text, some silently accept Circle and never draw it. The first object
--- of each class is probed once and the result is cached, so a missing class
--- becomes a stub instead of an object that holds a slot in every ESP loop and
--- never appears.
-local drawing_class_support = {}
-
-local drawing_class_works = function(backend, class)
-    local key = tostring(backend) .. "|" .. class
-    local cached = drawing_class_support[key]
-
-    if cached ~= nil then
-        return cached
-    end
-
-    local ok, works = pcall(function()
-        local object = backend["new"](class)
-
-        if object == nil then
-            return false
-        end
-
-        -- A backend that accepts the class but drops the property silently is
-        -- the common failure. Visible exists on every drawing class and is
-        -- cheap, so setting it and reading it back is the proof that the object
-        -- is real rather than a no-op handle.
-        object["Visible"] = true
-        local read_back = object["Visible"]
-
-        pcall(function()
-            object:Destroy()
-        end)
-        pcall(function()
-            object:Remove()
-        end)
-
-        return read_back == true
-    end)
-
-    works = ok and works == true
-    drawing_class_support[key] = works
-
-    return works
-end
-
-local create_drawing_object = function(backend, backend_is_opacity, class, properties, convention)
-    -- One backend lacking a class must not cost the whole feature. Fall back to
-    -- the other before giving up: an executor Drawing that never draws Circle
-    -- still builds the menu through Drawing2, and the reverse holds too.
-    if not backend or not drawing_class_works(backend, class) then
-        local alternate = backend == real_drawing and fake_drawing or real_drawing
-
-        if alternate and alternate ~= backend and drawing_class_works(alternate, class) then
-            backend = alternate
-            backend_is_opacity = alternate == fake_drawing and fake_is_opacity or real_is_opacity
-        else
-            return setmetatable({}, drawing_stub_mt)
-        end
-    end
-
-    local ok, object = pcall(function()
-        return backend["new"](class)
-    end)
-
-    if not ok or object == nil then
-        drawing_class_support[tostring(backend) .. "|" .. class] = false
-        return setmetatable({}, drawing_stub_mt)
-    end
-
-    local target = object
-
-    if backend_is_opacity ~= (convention == "opacity") then
-        target = setmetatable({ ["__TARGET"] = object }, transparency_proxy_mt)
-    end
-
-    unload_drawings[#unload_drawings+1] = target
+local create_real_drawing = LPH_NO_VIRTUALIZE(function(class, properties)
+    local object = real_drawing["new"](class)
 
     for property, value in properties do
-        pcall(function()
-            target[property] = value
-        end)
+        object[property] = value
     end
 
-    return target
-end
+    unload_drawings[#unload_drawings+1] = object
 
--- HUD drawing (center panel, crosshair, indicators, hit markers, damage numbers,
--- FOV) is written opacity-style (1 = solid, 0 = invisible). ESP objects are written
--- transparency-style (0 = solid, 1 = invisible). The convention decides the
--- inverter, so both render on either backend.
-local create_real_drawing = LPH_NO_VIRTUALIZE(function(class, properties)
-    return create_drawing_object(real_drawing, real_is_opacity, class, properties, "opacity")
+    return object
 end)
 
 local create_fake_drawing = LPH_NO_VIRTUALIZE(function(class, properties)
-    return create_drawing_object(fake_drawing, fake_is_opacity, class, properties, "opacity")
+    local object = fake_drawing["new"](class)
+
+    for property, value in properties do
+        object[property] = value
+    end
+
+    unload_drawings[#unload_drawings+1] = object
+
+    return object
 end)
 
-local create_esp_drawing = LPH_NO_VIRTUALIZE(function(class, properties)
-    return create_drawing_object(real_drawing, real_is_opacity, class, properties, "transparency")
-end)
+-- ESP drawings come from the real backend; every ESP call site uses this name.
+local create_esp_drawing = create_real_drawing
 
 local new_notification = menu["new_notification"]
 local set_ragebot_target = nil
@@ -13775,13 +13496,14 @@ end
             local new_text2_position = vector2_new(x_size + 12 + offset, y_size + 1)
             local new_heart_position = vector2_new(x_size + offset, y_size + 3)
 
-            -- Centre the state text on the real title bounds and drop it one
-            -- full line below the title.
+            -- Centre the state text on the real title bounds and sit it one
+            -- glyph line under the title. Text is top-anchored, so the y is the
+            -- top of the line: adding half the state height here pushed the
+            -- word a full half-line below the title and broke the stack.
             local title_left = new_text_position["X"]
             local title_right = new_text2_position["X"] + build_textbounds["X"]
             local title_bottom = y_size + 1 + math.max(juju_textbounds["Y"], build_textbounds["Y"])
-            local state_textbounds = text3["TextBounds"]
-            local new_text3_position = vector2_new((title_left + title_right)/2, title_bottom + 3 + state_textbounds["Y"]/2)
+            local new_text3_position = vector2_new((title_left + title_right)/2, title_bottom + 2)
 
             local new_shadow_position = new_text_position - vector2_new(shadow_size / 2, 0)
 
@@ -13933,7 +13655,7 @@ end
                     ["Visible"] = true,
                     ["Text"] = "juju",
                     ["Size"] = 12,
-                    ["Font"] = 0,
+                    ["Font"] = 2,
                     ["Outline"] = true,
                     ["Position"] = vector2_new(0, 0),
                 })
@@ -13945,7 +13667,7 @@ end
                     ["Visible"] = true,
                     ["Text"] = "beta",
                     ["Size"] = 12,
-                    ["Font"] = 0,
+                    ["Font"] = 2,
                     ["Outline"] = true,
                     ["Position"] = vector2_new(0, 0),
                 })
@@ -13958,7 +13680,7 @@ end
                     ["Text"] = "void",
                     ["Size"] = 12,
                     ["Visible"] = flags["center_panel_show_state"],
-                    ["Font"] = 0,
+                    ["Font"] = 2,
                     ["Outline"] = true,
                     ["Position"] = vector2_new(0, 0),
                 })
@@ -17657,8 +17379,8 @@ end
         menu_references["friendly_health_text_color"] = menu_references["health_text_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_health_text_color", ["transparency_flag"] = "friendly_health_text_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
 
     menu_references["fonts"] = menu_references["esp_section"]:create_element({["name"] = "fonts"}, {}):create_settings()
-        menu_references["main_font"] = menu_references["fonts"]:create_element({["name"] = "main font"}, {["dropdown"] = {["options"] = {"0", "1", "2", "3"}, ["requires_one"] = true, ["flag"] = "main_font", ["default"] = {"1"}}})
-        menu_references["small_font"] = menu_references["fonts"]:create_element({["name"] = "small font"}, {["dropdown"] = {["options"] = {"0", "1", "2", "3"}, ["requires_one"] = true, ["flag"] = "small_font", ["default"] = {"1"}}})
+        menu_references["main_font"] = menu_references["fonts"]:create_element({["name"] = "main font"}, {["dropdown"] = {["options"] = {"0", "1", "2", "3"}, ["requires_one"] = true, ["flag"] = "main_font", ["default"] = identifyexecutor() == "Wave" and {"1"} or {"2"}}})
+        menu_references["small_font"] = menu_references["fonts"]:create_element({["name"] = "small font"}, {["dropdown"] = {["options"] = {"0", "1", "2", "3"}, ["requires_one"] = true, ["flag"] = "small_font", ["default"] = identifyexecutor() == "Wave" and {"1"} or {"2"}}})
 
     -- >> ( esp variables )
 
@@ -17700,30 +17422,31 @@ end
         local material_value = Enum["Material"]["Neon"]
     local material_attribute = tostring({}):sub(math_random(8,12))
 
-    local main_font = 1
+    local main_font = identifyexecutor() == "Wave" and 1 or 2
     local main_size = identifyexecutor() == "Wave" and 13 or 13
-    local small_font = 1
+    local small_font = identifyexecutor() == "Wave" and 1 or 2
     local small_size = identifyexecutor() == "Wave" and 13 or 11
 
-    -- >> menu value is the Drawing transparency (0 = opaque, 1 = invisible), the
-    -- >> same convention the chams / highlight handlers already use. Seeding from
-    -- >> the flags keeps the initial state in sync with the menu, because the
-    -- >> colorpicker's change signal fires before these connections exist.
+    -- >> Drawing2 reads Transparency as opacity (1 = solid, 0 = invisible), the
+    -- >> convention the reborn ESP is built on. The menu flags keep their own
+    -- >> meaning (0 = opaque, 1 = invisible), so each is flipped on the way in.
+    -- >> Seeding from the flags keeps the initial state in sync with the menu,
+    -- >> because the colorpicker's change signal fires before these connections exist.
     local transparencies = {
         [1] = {
-            [1] = flags["box_transparency"] or 0,
-            [2] = flags["box_outline_transparency"] or 0,
-            [3] = flags["name_transparency"] or 0,
-            [4] = flags["health_bar_transparency"] or 0,
-            [5] = flags["health_bar_outline_transparency"] or 0,
-            [6] = flags["health_bar_gradient_transparency"] or 0,
-            [7] = flags["health_text_transparency"] or 0,
-            [8] = flags["tool_text_transparency"] or 0,
-            [9] = flags["tool_icon_transparency"] or 0,
-            [10] = flags["armor_bar_transparency"] or 0,
-            [11] = flags["armor_bar_outline_transparency"] or 0,
-            [12] = flags["armor_bar_gradient_transparency"] or 0,
-            [13] = flags["image_transparency"] or 0,
+            [1] = 1 - (flags["box_transparency"] or 0),
+            [2] = 1 - (flags["box_outline_transparency"] or 0),
+            [3] = 1 - (flags["name_transparency"] or 0),
+            [4] = 1 - (flags["health_bar_transparency"] or 0),
+            [5] = 1 - (flags["health_bar_outline_transparency"] or 0),
+            [6] = 1 - (flags["health_bar_gradient_transparency"] or 0),
+            [7] = 1 - (flags["health_text_transparency"] or 0),
+            [8] = 1 - (flags["tool_text_transparency"] or 0),
+            [9] = 1 - (flags["tool_icon_transparency"] or 0),
+            [10] = 1 - (flags["armor_bar_transparency"] or 0),
+            [11] = 1 - (flags["armor_bar_outline_transparency"] or 0),
+            [12] = 1 - (flags["armor_bar_gradient_transparency"] or 0),
+            [13] = 1 - (flags["image_transparency"] or 0),
             [14] = 0.11
         }
     }
@@ -17791,6 +17514,20 @@ end
 
     -- >> ( esp core )
 
+    -- > forward declaration: the icon table is built further down, but the esp
+    -- > loop reads it first; a nil table here hid every tool icon
+    local tool_icon_data = {}
+
+    -- > hoisted property reader: the pcall target must not be a fresh closure,
+    -- > allocating one per drawing per frame murders fps
+    local function drawing_is_dead(drawing)
+        return drawing == nil or drawing.Destroyed
+    end
+
+    -- > forward declaration: create_esp_with_tween is defined below as a local,
+    -- > but do_esp needs to trigger a rebuild; it assigns this reference
+    local create_esp_with_tween_ref = nil
+
     local do_esp = LPH_NO_VIRTUALIZE(function()
         for player, data in player_data do
             local parts = data[4]
@@ -17814,13 +17551,40 @@ end
             if on_screen then
                 local drawings = data[5]
 
+                -- > safety net: probe ONE canary drawing through a hoisted pcall
+                -- target instead of allocating a closure per drawing per frame.
+                -- a dead box means the rest died with it
+
+                local canary = drawings[1]
+
+                if canary ~= nil then
+                    local ok, dead = pcall(drawing_is_dead, canary)
+
+                    if not ok or dead then
+                        if create_esp_with_tween_ref then
+                            create_esp_with_tween_ref(data)
+
+                            continue
+                        end
+                    end
+                end
+
                 if not data[6] then
                     for _, drawing in drawings do
                         drawing["Visible"] = true
                     end
+
                     data[6] = true
+
                     local h = data[8]
                     if h and not h["Enabled"] then h["Enabled"] = true end
+
+                    local tool = data[13]
+                    local tool_icon_drawing = drawings[9]
+
+                    if tool_icon_drawing and (not tool or not tool_icon_data or not tool_icon_data[tool["Name"]]) then
+                        tool_icon_drawing["Visible"] = false
+                    end
                 end
 
                 local offset_pos = world_to_viewport_point(camera, position - offset)
@@ -17999,7 +17763,7 @@ end
 
         if not data[6] then
             for name, drawing in drawings do
-                drawing["Transparency"] = showing and transparencies[name] or 1
+                drawing["Transparency"] = showing and transparencies[name] or 0
             end
             if highlight then
                 highlight["FillTransparency"] = showing and highlight_transparencies[2] or 1
@@ -18028,7 +17792,7 @@ end
             for name, drawing in drawings do
                 local old_transparency = old_transparencies[name]
                 if old_transparency then
-                    drawing["Transparency"] = old_transparency + ((showing and transparencies[name] or 1) - old_transparency) * value
+                    drawing["Transparency"] = old_transparency + ((showing and transparencies[name] or 0) - old_transparency) * value
                 end
             end
 
@@ -18059,7 +17823,7 @@ end
                 remove(heartbeat, index)
             end
             for name, drawing in drawings do
-                drawing["Transparency"] = showing and transparencies[name] or 1
+                drawing["Transparency"] = showing and transparencies[name] or 0
             end
             if highlight then
                 highlight["FillTransparency"] = showing and highlight_transparencies[2] or 1
@@ -18622,7 +18386,7 @@ end
         })
     end)
 
-    local tool_icon_data = {
+    tool_icon_data = {
         ["[AK47]"] = base64_decode("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"),
         ["[Knife]"] = base64_decode("iVBORw0KGgoAAAANSUhEUgAAAHgAAAA8CAYAAACtrX6oAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAWJSURBVHhe7ZpLSJxXFMePGnV8a2KsiqiTjGJcmNaSahdqA0VEEAIqSKgrkYIuSqVkl3QTskhAaVJEFyq6raD4qGKhtbgoaiGEaBIfU6Np4yNOfURHR2Ps+d/5Zjqm85mkBhnN+cGfc+/57nzzfffce+c+hgRBEARBEARBEARBEARBEARBEARBEARBEARBEARBD4PBkMhmitUfHh5uVM73GC/NHhuKi4v7c3Nzc9bX18lsNlvu3LnzMbun7VcFVxKMRmNnQkLCelJSUpfWMzye8vLyXQcNDQ277EJvfm/R7cEmk+n75ubmSg4yTU9PU2Fh4ZOnT5/W86WtV2Q7gA/ycyP//+n7o7S0tLWlpYWTRLW1tVRZWYlkDusTFp5BT5tufK7aYKHBHCl0A5ydnd3a1tZWePLkSbJarVRVVUX19YjvXsLCwmhlZUWlvby8KDQ0lF6+fKksxB1JCfcJDAx05pFOS0tTZffD29tbff+jR49oe3tblZ+bm9Ou2sH9AgICKCQkhEpKSqiiokL5u7q66ObNm+Tr66vyB2SX3w/aZm3xc21DyGtph8957cSJE9svXrywLSwsPJ+dnV0dGxtb4vugsayxnrtYd+lllg8rhBWsWb30l6zPWP/5KdINcEZGxk8dHR2fR0VFaR6i27dvq8oKDg6mnZ0dFcDo6Gian5+n5eVlioyMVIFEEGCRRxqKiYlRwXoXcGVpKTsIMJ4Jz+PIAzQ4T2BxcZF49KPHjx+r0RCNlYNNW1tbyofr7p4VPtQzNxLixqLy6FBnz55VcUhOTiZ/f386c+YMPXv27PcbN25c0D7qRLcG0tPTh3p6ei64Blh4dzhGI1gE0B3oEBaLRTUKBBXBRZD9/Pyc1sHFixepv7//zVv0+fPnx7hncmcQPJ2mpib8dPyghW4PumMmDw1hWlLwYDo7OzE/muE4f6O59qAbYB42PtCSgofS3t5OZWVlM0tLS9mcdbvW1w0wd3ksGwQPZG1tja5fv750+fLlAZ5c6QYX6AbYx8fHvvYRPIqBgQHKz8+fvXr16kcbGxv7BhdIgI8ImElfuXLl77y8PI7xwKdw2a/sjwTYg7HZbHT37l3i9S1lZWU9uXXrVrrVan1tr3XlrTY6eEhQX4o1GBbpWKxjlwlrtNOnT6t1nTsMBoNakONzrmARv7q6ShMTE2qjJCIigpKSktC4VHnXdR7Y3NxU5WdmZtTiHot/lHF3b1d4hqmeG+UhTwR1hzrFmnhkZETtwg0PD68NDg4urays/MxFvmW9cWAd6NYKtip5llaISsdiHNPxa9eu0eTkpAoAKg1+WOyqOHyvgopPTU2lc+fOOXe54IOdmppSvyk4+cFnsbBHAFAO5aFTp06prVAEFq15fHzcGSxsT5pMJqWCggLKzMykxMR/z0SwpdnX10e9vb3qu3CvnJwcvJv6/P379/c0DKRjY2PVfd29y0HB/RFADLcADRbvAx9PlmzccDdGR0dHuNOM8jv+xkXaWQcaSXUDHBoaWt3d3f11SkoK3bt3j4qKima4l2EzGpvumGHDOvS6PPZfcTAQ4CLDG+bLWd+x/nQR9ipjWHEu+spoNCZWV1fTpUuXOEvU2NiIZQSSxawfWfmsD+Pj48O4URrMZjOGHDyXU0FBQQE84gRwA1QHGRxo5WeL4cSRhsXmAg5L1GGEI80W+S1YLa0srsPyqGWzWCzYa1bXWH+xHrCGWVbWoZHAwu4IHgYWeU8GJ0a7NTU1XP926urq0A2P3AnQu0R3ksVgHEHLx4kF7FuP/4fMrxCGVwfaKVKryryn4DjqOPFLXFzcFzxpC+TJCT18+NAyNDRUxH5ZERwXtP9hyX+yBEEQBEEQBEEQBEEQBEEQBEEQBEEQBEEQBEE4fIj+ASqHPcqC81tnAAAAAElFTkSuQmCC"),
         ["[Silencer]"] = base64_decode("iVBORw0KGgoAAAANSUhEUgAAAHgAAAA8CAYAAACtrX6oAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAc5SURBVHhe7ZxvSNtHGMdPozZaXYpFjFpN8A92loA6nOgkEdRu0oKVdhS2lbW0shd7M4QWacGOUmQwQaG+mNQXle1FoVMnpVQapIoy40pnh0VsY/9YY7M6MdVqGmP09jznxVnbtWouppr7wJe7536/JG2e3909z91FIpFIJBKJRCKRSCSSjUIDegTq4HWJDwjgpSiiQGkolUpVUVVVlRAUFERqamosg4OD9dDuBM1xueui2oK5QlaUHrdFRkaWTUxMVEL9N9AkaNPgkYPT09NTdDrdjy6XK9Fms+l4MwGbaDQa0tDQwOwLFy6Q5uZmolQqmb1ZWFhYIFFRUaS8vJzU1dURq9U6HRoaau/v7+8YGhr6C25xrNDLVbbNgijI63jk4Nzc3J/b29u/2myO85Ta2lpSUVFBwsLCeMuaWQDNBQQEOEDobFaC8GHA0m1jyRQYGIj2LGAfGxurg/uGQe/EIwdnZ2d3mUymPG76DdPT08RisRD4wnnLxgBOJna7nRw7dmy0r69vF2/2HjBED1PJhnPq1Ckc3vWLXng7gbxcF06nM4FXJRvInj17sGhkxjvwxMFJvJRsMM+ePcNiVXOwJw5OdjgwIJRsNHfu3MHiLDPegSdRwrdnzpypO3/+PDf9h5mZGTI/P8+tjSM4OJjcvXuXlJaW/j46OvoJb34r63ZwYWGh1Wg0qrnpV5SUlJDBwUH2ha+TBYjAMU1yutMfXsd0aKkN6wqFgrVBOQuf53zw4MEE5OC18B7eTZMggu6FHPjjyMhI3uI/7N69m9y7dy8fqh+Bli9gbKmFDo3BYOiBpzlm586dpKCggMTFxfFLW5fJyUmSlZVlMpvNObxpS4ObCFdA0zExMfTmzZs8U9uaPHz4kB49enSM/783BaKWYnDNLkur1XaYTCYSHR292OpFpqamyMuXOPq9yrZt28iOHTu49R94L/Y+mMsIzGOkv79/aSUKS/DfK/Xl13D1qK+v75+2tjbz06dPv4DmVc1/W5GO+vp69rR7E4vFQnU6HQ0NDaXh4eFLQhseMgppBL9zEYg4aV5eHgXns/sgWEFvLhfuRuHc+DdoEGQCtYEug34C/QCSW56AprKykn+t4oCeRwcGBrhFaVNTk9sxZSADCEcQ3KrEuiEnJ4dCKsPudblcdN++fXjvd6BvQIdBn4KyQakgHG4UIMkquAKwL1YkkGvT4uJiblF67tw5t4Mz2ae+TkdjYyO799atWzQkJATvPbR4yb/waC16JWq1+lBubi63xIDLchcvXiTXr18nN27cYG04z3L+5OVKzuIci8DwjGvmWLWwBj9DpIMP7t27l8TGxnJTDEajkQwPs5jm86qqKuvc3BymKWj/n3MR7LEM6MS8Jh3sKdWHD+P0Jhar1cpr5NfOzs4cTFNwN2X//v1PePubaNy167XtUr90sCj0+fn5FHoXm/dE0tPTQ5VKJXbDgyAMpjRFRUWYc38J9c9AyaAgXqKtj4uLo9Dr2eubm5vxtSMgiQc8unr1KvtCvUFDQwOF+R0d9VYFBQXRpKQkeu3aNf5KSm/fvk0jIiJ64bpfImKhQ3/gwIHOlpYWbophfHycLWYkJiYyG4Ot3t5e8uLFi6VFCDfgRwI5MImPjycpKSmvLHTgwTmIwNshQCvkTZK1AMPnYxxGRQNzLRuajxw5QltbW+nExAS/8mYgUqZ2u53CA0CfP3/OBA8IG6rBwb/wf67f4WkP1p84caIT0xiRtLW1Ya97DFXcsdGCirVarTotLS0WfPkBODN8fn4+wuVyYamCtnlIhyYdDsekQqGYDAwMdGsKrtvg2qq31yTLUKlUw5Bvsh4kkpKSEpxTv178FImv0JeXl3OXiAN3bCAoQgfLtV9fEhMT88SdiojEZrPRhIQEmdYIYr0LHXoIguLBEdwUA/iXdHV1YdnNmyQ+QAOpyAikLazHiQKCIRYxw/vjLxLl8OxDHlVXV3O3iOP+/fvufVrc8pP4CH1ycjIdHx/nbhEHHhSA98ffEksEstY5uPH06dMED9mJxmw2YyFTIx+iT09PZ6tF3oD3YJx/JT7iivuUhEgwuGppaaEZGRm4nSeDK18RHR1NR0ZGuFvEcenSJRk5e5FVz8EQWDXhkViRgH/J5ct4cJF8D5JrxT5GExUVNWw0Ghe7ngBwxyc1NRV7sOy97wma7du30+PHj9Pu7m7qcDi4q9YHvt5gMCydyZG8PxjwELmnvRnz6YKCglb+npL3iczMzD9mZ2e5q9YGDs01NTU0KytrFN5KDs9eZN0b/kVFRR/GxsYOaLVadlRGrVazvymFv0vCXxnib4BWHq1xc/LkSVJdXe3e0JfBlRcRcSYL145LwZlamJ8TlUqlLiIiguCxVfxjaFjiQ4DOxwdhaGiIlJWVDc/MzODrpHO9jAgHvwkVCI/auJUBKgkLC5tyuVwdTqcT/yygdK5EIpFIJBKJRCKRSCQSgRDyLy07ZkeXOhAYAAAAAElFTkSuQmCC"),
@@ -18675,13 +18439,25 @@ end
 
             data[20] = nil
 
-            local image = tool and tool_icon_data[tool["Name"]] or ""
-            data[5][9] = create_esp_drawing("Image", {
+            -- > kill the previous icon first: blindly overwriting data[5][9]
+            -- orphans the old native drawing, it keeps rendering at its last
+            -- position forever and no hide loop can ever reach it again
+
+            local drawings = data[5]
+            local old_icon = drawings[9]
+
+            if old_icon then
+                old_icon:Destroy()
+                drawings[9] = nil
+            end
+
+            local image = (tool and tool_icon_data and tool_icon_data[tool["Name"]]) or ""
+            drawings[9] = create_fake_drawing("Image", {
                 Color = colors[status][9],
                 Transparency = transparencies[status][9],
                 Data = image,
                 Size = vector2_new(24,12),
-                Visible = data[6]
+                Visible = data[6] and tool ~= nil
             })
         end
     end) or LPH_NO_VIRTUALIZE(function(data)
@@ -18691,20 +18467,53 @@ end
 
             data[20] = nil
 
-            local image = tool and tool_icon_data[tool["Name"]] or ""
-            data[5][9] = create_esp_drawing("Image", {
+            -- > kill the previous icon first: blindly overwriting data[5][9]
+            -- orphans the old native drawing, it keeps rendering at its last
+            -- position forever and no hide loop can ever reach it again
+
+            local drawings = data[5]
+            local old_icon = drawings[9]
+
+            if old_icon then
+                old_icon:Destroy()
+                drawings[9] = nil
+            end
+
+            local image = (tool and tool_icon_data and tool_icon_data[tool["Name"]]) or ""
+            drawings[9] = create_real_drawing("Image", {
                 Color = colors[status][9],
                 Transparency = transparencies[status][9],
                 Data = image,
                 Size = vector2_new(24,12),
-                Visible = data[6]
+                Visible = data[6] and tool ~= nil
             })
         end
     end)
 
     local update_tool_icon = LPH_NO_VIRTUALIZE(function(data, tool)
-        if data[2] and data[5][9] then
-            data[5][9]["Data"] = tool and tool_icon_data[tool["Name"]] or ""
+        -- > reuse the SAME drawing: destroying + recreating here orphaned the old
+        -- icon at its last screen position (the "stuck tool icon" bug) while a
+        -- fresh one spawned without position updates until the next frame
+
+        local icon = data[2] and data[5][9]
+
+        if not icon then
+            -- > no icon yet (late joiner or toggle race): build it once instead
+            -- of dropping the equip event, create_tool_icon destroys any
+            -- previous drawing so this can never stack a second one
+
+            create_tool_icon(data)
+            return
+        end
+
+        if tool and tool_icon_data and tool_icon_data[tool["Name"]] then
+            icon["Data"] = tool_icon_data[tool["Name"]]
+            icon["Visible"] = data[6]
+        else
+            -- > empty-data images render as white squares, hide the icon instead
+
+            icon["Data"] = ""
+            icon["Visible"] = false
         end
     end)
 
@@ -18956,6 +18765,9 @@ end
         create_esp(data)
         tween_esp(data, true)
     end)
+
+    -- > hand the real function to do_esp (forward declaration above)
+    create_esp_with_tween_ref = create_esp_with_tween
 
     -- >> ( show arms in first person)
 
@@ -19479,6 +19291,7 @@ end
         end))
 
         create_connection(menu_references["box_outline"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[1][2] = transparency
             transparencies[2][2] = transparency
             transparencies[3][2] = transparency
@@ -19513,6 +19326,7 @@ end
         end))
 
         create_connection(menu_references["health_bar_outline"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[1][5] = transparency
             transparencies[2][5] = transparency
             transparencies[3][5] = transparency
@@ -19813,6 +19627,7 @@ end
         end))
 
         create_connection(menu_references["armor_bar_outline"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[1][11] = transparency
             transparencies[2][11] = transparency
             transparencies[3][11] = transparency
@@ -20031,6 +19846,7 @@ end
         end))
 
         create_connection(menu_references[name.."box_color"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[1] = transparency
 
             if do_box then
@@ -20062,6 +19878,7 @@ end
         end))
 
         create_connection(menu_references[name.."name_color"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[3] = transparency
 
             if do_name then
@@ -20093,6 +19910,7 @@ end
         end))
 
         create_connection(menu_references[name.."health_bar_color"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[4] = transparency
 
             if do_health_bar then
@@ -20124,6 +19942,7 @@ end
         end))
 
         create_connection(menu_references[name.."health_bar_gradient"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[6] = transparency
 
             if do_health_bar and do_health_bar_gradient then
@@ -20252,6 +20071,7 @@ end
         end))
 
         create_connection(menu_references[name.."health_text_color"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[7] = transparency
 
             if do_health_text then
@@ -20283,6 +20103,7 @@ end
         end))
 
         create_connection(menu_references[name.."tool_text_color"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[8] = transparency
 
             if do_tool_text then
@@ -20314,6 +20135,7 @@ end
         end))
 
         create_connection(menu_references[name.."tool_icon_color"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[9] = transparency
 
             if do_tool_icon then
@@ -20345,6 +20167,7 @@ end
         end))
 
         create_connection(menu_references[name.."armor_bar_color"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[10] = transparency
 
             if do_armor_bar then
@@ -20376,6 +20199,7 @@ end
         end))
 
         create_connection(menu_references[name.."armor_bar_gradient"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[12] = transparency
 
             if do_armor_bar and do_armor_bar_gradient then
@@ -20407,6 +20231,7 @@ end
         end))
 
         create_connection(menu_references[name.."image_color"]["on_transparency_change"], LPH_NO_VIRTUALIZE(function(transparency)
+            transparency = 1 - transparency
             transparencies[13] = transparency
 
             if do_image then
