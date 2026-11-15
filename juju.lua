@@ -10041,6 +10041,34 @@ do
         end
     end))
 
+    -- >> ( anti stuck )
+
+    menu_references["anti_stuck"] = menu_references["movement_section"]:create_element({["name"] = "anti stuck"}, {["toggle"] = {["flag"] = "anti_character"}})
+
+    local anti_stuck_heartbeat_connection = nil
+
+    local do_anti_stuck = LPH_NO_VIRTUALIZE(function()
+        local root_part = local_parts["HumanoidRootPart"]
+        local humanoid = local_parts["Humanoid"]
+
+        if root_part and root_part["Parent"] and humanoid and humanoid["MoveDirection"]["Magnitude"] == 0 then
+            local velocity = root_part["AssemblyLinearVelocity"]
+
+            root_part["AssemblyLinearVelocity"] = vector3_new(0.1, velocity["Y"], 0.1)
+        end
+    end)
+
+    create_connection(menu_references["anti_stuck"]["on_toggle_change"], LPH_NO_VIRTUALIZE(function(value)
+        if anti_stuck_heartbeat_connection then
+            anti_stuck_heartbeat_connection:Disconnect()
+            anti_stuck_heartbeat_connection = nil
+        end
+
+        if value then
+            anti_stuck_heartbeat_connection = create_connection(run_service["Heartbeat"], do_anti_stuck)
+        end
+    end))
+
     -- >> ( noclip )
 
     menu_references["noclip"] = menu_references["movement_section"]:create_element({["name"] = "noclip"}, {["toggle"] = {["flag"] = "noclip"}})
@@ -13365,6 +13393,7 @@ end
         menu_references["drawing_crosshair_line_size"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "line size"}, {["slider"] = {["flag"] = "drawing_crosshair_line_size", ["min"] = 4, ["max"] = 30, ["suffix"] = "px", ["default"] = 5}})
         menu_references["drawing_crosshair_gap_size"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "gap size"}, {["slider"] = {["flag"] = "drawing_crosshair_gap_size", ["min"] = 1, ["max"] = 30, ["suffix"] = "px", ["default"] = 2}})
         menu_references["drawing_crosshair_rotation"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "rotating"}, {["slider"] = {["flag"] = "drawing_crosshair_rotation", ["min"] = 0, ["max"] = 100, ["suffix"] = "%", ["min_text"] = "off"}})
+        menu_references["drawing_crosshair_lerp"] = menu_references["drawing_crosshair_settings"]:create_element({["name"] = "lerp"}, {["slider"] = {["flag"] = "drawing_crosshair_lerp", ["min"] = 1, ["max"] = 100, ["suffix"] = "%", ["default"] = 27, ["max_text"] = "instant"}})
         menu_references["center_panel"] = menu_references["hud_section"]:create_element({["name"] = "center panel"}, {["toggle"] = {["flag"] = "center_panel"}})
         menu_references["center_panel_settings"] = menu_references["center_panel"]:create_settings()
         menu_references["center_panel_show_state"] = menu_references["center_panel_settings"]:create_element({["name"] = "show state"}, {["toggle"] = {["flag"] = "center_panel_show_state"}})
@@ -13757,6 +13786,7 @@ end
         local lines = {}
 
         local gap_offset, length, rot = 10, 6, 0
+        local crosshair_lerp = 0.27
         local cos = math["cos"]
         local sin = math["sin"]
         local pi = math["pi"]
@@ -13794,7 +13824,17 @@ end
                 old_position = new_position
             end
     
-            local position = old_position + (new_position - old_position) * dt * 16
+            local lerp_alpha = crosshair_lerp >= 1 and 1 or 1 - (1 - crosshair_lerp) ^ (dt * 60)
+            local position = old_position + (new_position - old_position) * lerp_alpha
+
+            -- snap onto the target once close enough so the idle frame skip below can kick in
+            local snap_x = new_position["X"] - position["X"]
+            local snap_y = new_position["Y"] - position["Y"]
+
+            if snap_x * snap_x + snap_y * snap_y < 0.0025 then
+                position = new_position
+            end
+
             local px = position["X"]
             local py = position["Y"]
 
@@ -14043,6 +14083,10 @@ end
 
         create_connection(menu_references["drawing_crosshair_animation_speed"]["on_slider_change"], function(value)
             animation_speed = value/100
+        end)
+
+        create_connection(menu_references["drawing_crosshair_lerp"]["on_slider_change"], function(value)
+            crosshair_lerp = value/100
         end)
 
         create_connection(menu_references["drawing_crosshair_line_thickness"]["on_slider_change"], function(value)
