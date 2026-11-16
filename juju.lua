@@ -752,6 +752,25 @@ local menu = {
         end
     end
 
+    -- The keybind pill is sized off its own label. Drawing text is top-anchored
+    -- even with Center on, so the label sits from its own height: a 12 px pill
+    -- could not hold a full glyph line and the letter spilled through the
+    -- bottom border of the pill instead of sitting inside it.
+    local size_keybind = LPH_NO_VIRTUALIZE(function(drawings)
+        local keybind_border = drawings["keybind_border"]
+        local keybind_inside = drawings["keybind_inside"]
+        local keybind_text = drawings["keybind_text"]
+        local bounds = keybind_text["TextBounds"]
+        local size = bounds["X"] + 8
+        local height = math["max"](16, bounds["Y"] + 2)
+        local inside_height = height - 2
+
+        keybind_border["Size"] = udim2_new(0, size, 0, height)
+        keybind_border["Position"] = udim2_new(1, -size, 0, (17 - height)/2)
+        keybind_inside["Size"] = udim2_new(0, size-2, 0, inside_height)
+        keybind_text["Position"] = udim2_new(0.5, 0, 0, (inside_height - bounds["Y"])/2)
+    end)
+
     -- > ( menu creation )
 
     local cursor = drawing_proxy["new"]("Image", {
@@ -2083,18 +2102,11 @@ local menu = {
         actives["binding"] = element
 
         local drawings = element["drawings"]
-        local keybind_border = drawings["keybind_border"]
-        local keybind_inside = drawings["keybind_inside"]
         local keybind_text = drawings["keybind_text"]
 
         keybind_text["Text"] = "..."
 
-        local size = keybind_text["TextBounds"]["X"] + 8
-
-        keybind_border["Size"] = udim2_new(0, size, 0, 12)
-        keybind_border["Position"] = udim2_new(1, -size, 0, 0)
-        keybind_inside["Size"] = udim2_new(0, size-2, 0, 10)
-        keybind_text["Position"] = udim2_new(0, (size-2)/2, 0, 5)
+        size_keybind(drawings)
 
         local escape = Enum["KeyCode"]["Escape"]
         local tilde = Enum["KeyCode"]["Tilde"]
@@ -5202,15 +5214,11 @@ local menu = {
                     ["Position"] = udim2_new(0.5, 0, 0, -1),
                 })
 
-                local size = keybind_text["TextBounds"]["X"] + 8
-
-                keybind_border["Size"] = udim2_new(0, size, 0, 12)
-                keybind_border["Position"] = udim2_new(1, -size, 0, 0)
-                keybind_inside["Size"] = udim2_new(0, size-2, 0, 10)
-
                 new_element["drawings"]["keybind_border"] = keybind_border
                 new_element["drawings"]["keybind_inside"] = keybind_inside
                 new_element["drawings"]["keybind_text"] = keybind_text
+
+                size_keybind(new_element["drawings"])
                 new_element["on_key_change"] = signal["new"]()
                 new_element["on_key_press"] = signal["new"]()
 
@@ -5659,18 +5667,11 @@ local menu = {
 
     function element:set_key(value)
         local drawings = self["drawings"]
-        local keybind_border = drawings["keybind_border"]
-        local keybind_inside = drawings["keybind_inside"]
         local keybind_text = drawings["keybind_text"]
 
         keybind_text["Text"] = value and (shortened_characters[value] and shortened_characters[value] or value["Name"]:lower()) or "none"
 
-        local size = keybind_text["TextBounds"]["X"] + 8
-
-        keybind_border["Size"] = udim2_new(0, size, 0, 12)
-        keybind_border["Position"] = udim2_new(1, -size, 0, 0)
-        keybind_inside["Size"] = udim2_new(0, size-2, 0, 10)
-        keybind_text["Position"] = udim2_new(0, (size-2)/2, 0, 5)
+        size_keybind(drawings)
 
         local flag = self["keybind_flag"]
 
@@ -9298,6 +9299,16 @@ do
         local shot_seen_at = nil
         local grace = 0.05 + local_ping/2000
 
+        -- The miss is read on the frame the shot was reported, not after the
+        -- result wait: by then the limb has moved, and a killing shot may have
+        -- taken the character -- and the part -- away entirely, which used to
+        -- drop the report from the damage number on exactly those hits.
+        local message = nil
+
+        if old_server_position and part and aim_position and part["Parent"] then
+            message = " (pred miss: "..tostring(round((aim_position-part["Position"])["Magnitude"], 1))..") (velocity: "..tostring(round((target_velocity or vector3_zero)["Magnitude"], 1))..(did_defensive and ") (defensive: true)" or ") (defensive: false)")
+        end
+
         repeat
             wait()
 
@@ -9310,12 +9321,6 @@ do
 
         if new_health == nil then
             return
-        end
-
-        local message = nil
-
-        if old_server_position and part and aim_position and part["Parent"] then
-            message = " (pred miss: "..tostring(round((aim_position-part["Position"])["Magnitude"], 1))..") (velocity: "..tostring(round((target_velocity or vector3_zero)["Magnitude"], 1))..(did_defensive and ") (defensive: true)" or ") (defensive: false)")
         end
 
         if new_health < old_health then
@@ -14646,7 +14651,7 @@ end
         menu_references["damage_number_color"] = menu_references["damage_number_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "damage_number_color", ["transparency_flag"] = "damage_number_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
         menu_references["damage_number_lethal_color"] = menu_references["damage_number_settings"]:create_element({["name"] = "lethal color"}, {["colorpicker"] = {["color_flag"] = "damage_number_lethal_color", ["transparency_flag"] = "damage_number_lethal_transparency", ["default_color"] = color3_fromrgb(255, 55, 55), ["default_transparency"] = 0}})
         menu_references["damage_number_outline_color"] = menu_references["damage_number_settings"]:create_element({["name"] = "outline color"}, {["colorpicker"] = {["color_flag"] = "damage_number_outline_color", ["transparency_flag"] = "damage_number_outline_transparency", ["default_color"] = color3_fromrgb(15, 15, 15), ["default_transparency"] = 0}})
-        menu_references["damage_number_show_ragebot_data"] = menu_references["damage_number_settings"]:create_element({["name"] = "show ragebot data"}, {["toggle"] = {["flag"] = "damage_number_show_ragebot_data"}})
+        menu_references["damage_number_show_ragebot_data"] = menu_references["damage_number_settings"]:create_element({["name"] = "show ragebot data"}, {["toggle"] = {["flag"] = "damage_number_show_ragebot_data", ["default"] = true}})
     menu_references["d3_hit_marker"] = menu_references["game_section"]:create_element({["name"] = "3d hit marker"}, {["toggle"] = {["flag"] = "d3_hit_marker"}})
         menu_references["d3_hit_marker_settings"] = menu_references["d3_hit_marker"]:create_settings()
         menu_references["d3_hit_marker_lifetime"] = menu_references["d3_hit_marker_settings"]:create_element({["name"] = "lifetime"}, {["slider"] = {["flag"] = "d3_hit_marker_lifetime", ["min"] = 0.1, ["max"] = 2, ["default"] = 0.7, ["decimals"] = 1, ["suffix"] = "s", ["prefix"] = ""}})
@@ -15924,7 +15929,7 @@ end
                     ["Size"] = 11,
                     ["Color"] = color,
                     ["OutlineColor"] = damage_number_outline_color,
-                    ["Transparency"] = 1,
+                    ["Transparency"] = 0,
                     ["ZIndex"] = 5499,
                     ["Outline"] = true,
                     ["Font"] = esp_font(),
@@ -15946,6 +15951,8 @@ end
                 local position, on_screen = world_to_viewport_point(camera, new_position)
 
                 if on_screen then
+                    number["Visible"] = true
+
                     if elapsed_time > lifetime then
                         local part_position = part_position + show_offset
                         local value = get_value(tween_service, (elapsed_time - lifetime) / new_half, exponential, out)
@@ -15961,8 +15968,11 @@ end
                     number["Position"] = vector2_new(position["X"] + 13, position["Y"])
 
                     if info then
+                        -- The report follows the number through the fade and comes
+                        -- back if the hit point left the viewport for a frame.
+                        info["Visible"] = true
                         info["Position"] = vector2_new(position["X"] + 13, position["Y"] + 14)
-                        info["Transparency"] = clamp((number["Transparency"] or 0) + 0.15, 0, 1)
+                        info["Transparency"] = clamp(number["Transparency"] or 0, 0, 1)
                     end
                 else
                     number["Visible"] = false
@@ -22997,7 +23007,15 @@ local backtrack_data = {}
             or (list_current_character ~= nil and target[3] ~= list_current_character)
             or not ragebot_targets[target]
 
-        if target_list_only and list_target_gone and flags["ragebot"] and not (spawn_guard["lock_while_waiting"] and spawn_guard["waiting"]) then
+        -- A pending forcefield hold belongs to single-target loop killing. In list
+        -- mode it would pin the rotation to the name that just died -- the list
+        -- would sit on that one name until it respawned instead of going on to
+        -- the next one -- so it is dropped and the list rotates freely.
+        if target_list_only then
+            spawn_guard["waiting"] = nil
+        end
+
+        if target_list_only and list_target_gone and flags["ragebot"] then
             local new_target = get_target_list_target(ragebot_targets[target] and target or last_target_list_target)
 
             if new_target then
@@ -23103,7 +23121,10 @@ local backtrack_data = {}
             local untarget_knocked = ragebot_untarget_when_knocked and target[18]
             local untarget_flung = ragebot_untarget_when_flung and torso and torso["Velocity"]["Magnitude"] > 100
             local untarget_invulnerable = ragebot_untarget_when_invulnerable and (has_forcefield or grabbing_constraint)
-            local hold_for_loop = spawn_guard["loop_after_kill"] and (dead or has_forcefield) and not untarget_knocked and not untarget_flung
+            -- The list owns its rotation. Holding a dead name for its forcefield
+            -- is the single-target loop-kill behavior and would pin the list to
+            -- the first name that died instead of going on to the next one.
+            local hold_for_loop = spawn_guard["loop_after_kill"] and not target_list_only and (dead or has_forcefield) and not untarget_knocked and not untarget_flung
 
             if untarget_dead or untarget_knocked or untarget_flung or untarget_invulnerable then
                 if hold_for_loop then
@@ -25305,10 +25326,28 @@ local backtrack_data = {}
             if hrp and not purchasing and not local_reloading and (not in_void or bypass) then
                 local tick = clock()
 
-                local targets = auto_stomp_target_target and {ragebot_target} or {}
+                -- A list body is finished only while the ragebot has nothing
+                -- living to shoot. The stomp teleports the character for a frame
+                -- and the shot origin is read off that teleport, so stomping a
+                -- knocked name while another list target is still alive sends
+                -- the next shot at that target out of the corpse -- the list
+                -- then sits on a target it cannot kill. The live target wins;
+                -- the bodies are stomped once the list has no living name left.
+                local live_target = ragebot_target ~= nil and not ragebot_target[7] and not ragebot_target[18]
+
+                local targets = {}
+
+                if auto_stomp_target_target and ragebot_target then
+                    targets[#targets+1] = ragebot_target
+                end
 
                 for player, data in player_data do
                     local status = data[1]
+
+                    if ragebot_targets[data] and live_target and data ~= ragebot_target then
+                        continue
+                    end
+
                     if auto_stomp_target_neutral and status == 1 or auto_stomp_target_enemy and status == 3 or auto_stomp_target_friendly and status == 2 or ragebot_targets[data] then
                         targets[#targets+1] = data
                     end
@@ -29768,6 +29807,34 @@ end)
         state["baseline"] = false
     end)
 end)()
+
+-- > ( reset after execute )
+
+-- The character that was already up when the hub was executed was built before
+-- any of its hooks existed, so it can still be carrying what the previous
+-- session left on it -- a tool, a skin, an effect -- and every per-character
+-- feature sets itself up on the spawn it saw. One reset after the load gives
+-- the hub a character it watched spawn from the start. Loading during the menu
+-- or while the player is dead leaves nothing to reset; the first character
+-- that lands is used instead.
+spawn(function()
+    local started = clock()
+
+    while clock() - started < 8 do
+        local character = local_player["Character"]
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+        if humanoid and humanoid["Health"] > 0 then
+            -- Let the menu and the character hooks finish setting up before the
+            -- respawn replaces the body.
+            wait(1.5)
+            humanoid["Health"] = 0
+            return
+        end
+
+        wait(0.25)
+    end
+end)
 
 end, function(err)
     local ok, trace = pcall(debug.traceback, "", 2)
