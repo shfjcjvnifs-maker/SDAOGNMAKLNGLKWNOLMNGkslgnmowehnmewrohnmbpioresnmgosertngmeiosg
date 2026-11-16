@@ -9514,6 +9514,20 @@ do
         signals["on_local_bullet_fired"]:Fire(ray, nil, cframe_new(to), true)
     end)
 
+    -- A shot the game or the player's own click sent at the selected ragebot
+    -- target carries the same report an auto fire shot does. Before this, only
+    -- auto fire reported, so setting a target and shooting by hand showed the
+    -- plain number with no ragebot line under it.
+    local get_ragebot_report = LPH_NO_VIRTUALIZE(function(player, part)
+        local data = player_data[player]
+
+        if not data or data ~= ragebot_target or not part or not part["Parent"] or not ragebot_aim_position then
+            return
+        end
+
+        return local_server_position["p"] + vector3_new(0.004, 3.0208, -0.048), ragebot_aim_position, ragebot_aim_velocity, ragebot_aim_defensive
+    end)
+
     local shoot_shape_reported = false
 
     local new = {
@@ -9622,11 +9636,13 @@ do
                                 if parent["GetAttribute"](parent, "1") then
                                     part = player_data[player][4][part["Name"]]
                                     args[5] = part
-                                    spawn(get_bullet_result, player, part)
+                                    local report_origin, report_aim, report_velocity, report_defensive = get_ragebot_report(player, part)
+                                    spawn(get_bullet_result, player, part, report_origin, report_aim, report_velocity, report_defensive)
                                     return old_namecall(self, unpack(args))
                                 end
 
-                                spawn(get_bullet_result, player, part)
+                                local report_origin, report_aim, report_velocity, report_defensive = get_ragebot_report(player, part)
+                                spawn(get_bullet_result, player, part, report_origin, report_aim, report_velocity, report_defensive)
                             end
                         end
                     end
@@ -11825,11 +11841,18 @@ do
     end)
 
     create_connection(set_ragebot_target_button["on_clicked"], function()
-        if selected_player and flags["ragebot"] then
+        if selected_player then
             local data = player_data[selected_player]
 
             if data then
-                set_ragebot_target(data, "successfully ragebot target set to "..selected_player["Name"])
+                -- The button is silent when the ragebot is off, which reads as
+                -- "setting the target does nothing". Say why.
+                if not flags["ragebot"] then
+                    new_notification("enable ragebot to set a target", 3)
+                    return
+                end
+
+                set_ragebot_target(data, "successfully ragebot target set to "..selected_player["Name"], true)
             end
         end
     end)
@@ -14651,7 +14674,6 @@ end
         menu_references["damage_number_color"] = menu_references["damage_number_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "damage_number_color", ["transparency_flag"] = "damage_number_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
         menu_references["damage_number_lethal_color"] = menu_references["damage_number_settings"]:create_element({["name"] = "lethal color"}, {["colorpicker"] = {["color_flag"] = "damage_number_lethal_color", ["transparency_flag"] = "damage_number_lethal_transparency", ["default_color"] = color3_fromrgb(255, 55, 55), ["default_transparency"] = 0}})
         menu_references["damage_number_outline_color"] = menu_references["damage_number_settings"]:create_element({["name"] = "outline color"}, {["colorpicker"] = {["color_flag"] = "damage_number_outline_color", ["transparency_flag"] = "damage_number_outline_transparency", ["default_color"] = color3_fromrgb(15, 15, 15), ["default_transparency"] = 0}})
-        menu_references["damage_number_show_ragebot_data"] = menu_references["damage_number_settings"]:create_element({["name"] = "show ragebot data"}, {["toggle"] = {["flag"] = "damage_number_show_ragebot_data", ["default"] = true}})
     menu_references["d3_hit_marker"] = menu_references["game_section"]:create_element({["name"] = "3d hit marker"}, {["toggle"] = {["flag"] = "d3_hit_marker"}})
         menu_references["d3_hit_marker_settings"] = menu_references["d3_hit_marker"]:create_settings()
         menu_references["d3_hit_marker_lifetime"] = menu_references["d3_hit_marker_settings"]:create_element({["name"] = "lifetime"}, {["slider"] = {["flag"] = "d3_hit_marker_lifetime", ["min"] = 0.1, ["max"] = 2, ["default"] = 0.7, ["decimals"] = 1, ["suffix"] = "s", ["prefix"] = ""}})
@@ -15896,7 +15918,12 @@ end
             local text = damage
             local info_text = nil
 
-            if flags["damage_number_show_ragebot_data"] and message then
+            -- The report is the ragebot's own account of the shot and is always
+            -- drawn with the number. It used to sit behind a toggle, but every
+            -- config saved while that toggle defaulted to off kept the report
+            -- hidden no matter what the code asked for; the line is short and
+            -- only exists when there is something to report.
+            if message then
                 -- What the resolver did with the shot, compact enough to sit
                 -- under the number: how far the aim point missed, how fast the
                 -- target was moving, and whether the shot was a defensive one.
@@ -22801,6 +22828,11 @@ local backtrack_data = {}
     -- if the death flag was never seen going up between two frames.
     local target_list_characters = {}
 
+    -- The name the player picked by hand. While this is the current target the
+    -- list leaves it alone: a rotation is the list's own behaviour and must not
+    -- overwrite a target that was asked for by name.
+    local target_list_manual = nil
+
     -- Next alive player in the list after `current`; wraps around the end.
     local get_target_list_target = LPH_NO_VIRTUALIZE(function(current)
         local list = {}
@@ -22936,9 +22968,12 @@ local backtrack_data = {}
         return best or position
     end
 
-    set_ragebot_target = LPH_NO_VIRTUALIZE(function(target, message)
+    set_ragebot_target = LPH_NO_VIRTUALIZE(function(target, message, manual)
         if not target then
             spawn_guard["waiting"] = nil
+            target_list_manual = nil
+        elseif manual then
+            target_list_manual = target
         end
 
         if ragebot_target == target then
@@ -22986,9 +23021,9 @@ local backtrack_data = {}
         -- Cycle the player list targets. The current one is held while it can
         -- still be fought: the loop moves to the next name once it dies, once it
         -- is knocked down (so it can be stomped), or once it respawns with a new
-        -- character. A current target that is not on the list, or was taken off
-        -- it, hands the slot to the list as well. The list wraps after the last
-        -- name, so it keeps looping.
+        -- character. Unless the name was picked by hand, a current target that
+        -- is not on the list, or was taken off it, hands the slot to the list as
+        -- well. The list wraps after the last name, so it keeps looping.
         --
         -- The character a list target was selected on is only worth keeping while
         -- that player is still on the list; dropped members are pruned here so a
@@ -23001,11 +23036,19 @@ local backtrack_data = {}
 
         local list_current_character = target and target_list_characters[target]
 
+        -- A name picked by hand is not the list's to rotate away from. Rotating
+        -- over it made the player editor's "set ragebot target" button look dead
+        -- whenever any name was on the list: the next frame put the list's own
+        -- pick back. The hold only lasts while that name can be fought -- a hand
+        -- picked target that dies or goes down hands the loop back to the list --
+        -- and is released once the target is cleared or set to nobody.
+        local list_manual_target = target ~= nil and target_list_manual == target and not target[7] and not target[18]
+
         local list_target_gone = target == nil
-            or target[7]
-            or target[18]
-            or (list_current_character ~= nil and target[3] ~= list_current_character)
-            or not ragebot_targets[target]
+            or (not list_manual_target and (target[7]
+                or target[18]
+                or (list_current_character ~= nil and target[3] ~= list_current_character)
+                or not ragebot_targets[target]))
 
         -- A pending forcefield hold belongs to single-target loop killing. In list
         -- mode it would pin the rotation to the name that just died -- the list
@@ -23015,7 +23058,7 @@ local backtrack_data = {}
             spawn_guard["waiting"] = nil
         end
 
-        if target_list_only and list_target_gone and flags["ragebot"] then
+        if target_list_only and not list_manual_target and list_target_gone and flags["ragebot"] then
             local new_target = get_target_list_target(ragebot_targets[target] and target or last_target_list_target)
 
             if new_target then
@@ -26502,11 +26545,19 @@ local get_backtrack_models = nil
                         if silent_aim_position or ragebot_aim_position then
                             local calling_script = not force and getcallingscript()
                             if force or (calling_script and calling_script["Name"]:find("Gun")) then
-                                if ragebot_aim_position then
+                                -- Silent aim owns the shot when it has a point this
+                                -- frame; the ragebot's solved point is the stand-in
+                                -- for a shot silent aim is not holding. Returning
+                                -- the ragebot point first made a locked target steal
+                                -- every manual shot, so silent aim looked dead any
+                                -- time the ragebot had a target -- and with the list
+                                -- it had one permanently.
+                                if silent_aim_position then
+                                    if math_random(1,100) > silent_aim_redirect_chance then
+                                        return cframe_new(silent_aim_position)
+                                    end
+                                elseif ragebot_aim_position then
                                     return cframe_new(ragebot_aim_position)
-                                end
-                                if math_random(1,100) > silent_aim_redirect_chance then
-                                    return cframe_new(silent_aim_position)
                                 end
                             end
                         end
@@ -26683,7 +26734,18 @@ local get_backtrack_models = nil
 
                 if data then
                     local parts = data[4]
-                    local hrp = parts["HumanoidRootPart"]
+                    local hrp = parts and parts["HumanoidRootPart"]
+
+                    -- A target whose body is gone -- dead, mid respawn, or its
+                    -- root removed -- has no position to read. This used to index
+                    -- the missing root and error out of the whole legitbot pass on
+                    -- every frame, which froze silent aim and aim assist on that
+                    -- old target instead of picking a live one.
+                    if not hrp or not hrp["Parent"] then
+                        set_legitbot_target(nil)
+                        return
+                    end
+
                     local hrp_position = hrp["Position"]
 
                     if (legitbot_untarget_when_knocked and data[18]) then
@@ -28747,7 +28809,7 @@ do
             end
 
             if flags["ragebot"] then
-                set_ragebot_target(player and player_data[player] or nil, "ragebot target set to "..(player and player["Name"] or "nobody"))
+                set_ragebot_target(player and player_data[player] or nil, "ragebot target set to "..(player and player["Name"] or "nobody"), true)
 
                 return true
             end
