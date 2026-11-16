@@ -8479,6 +8479,12 @@ local ragebot_aim_position = nil
 -- character, hit position on the best visible limb. nil means the plain shot.
 local ragebot_manipulation = nil
 local ragebot_firing_shot = false
+-- Auto fire "dont render" belongs to the shot, not to the mode that sends it:
+-- the hub's fake beam, the local tracers and the bullet ray the game replicates
+-- back after the server round trip all read this marker. It holds the time of
+-- the last shot sent with the toggle on, so the ray that arrives a round trip
+-- later is attributed to the shot that made it.
+local ragebot_silent_shot_time = 0
 
 -- Infinite distance needs no state of its own: the flag decides whether the
 -- origin is spoofed beside the body or taken from the solver.
@@ -8656,6 +8662,13 @@ local local_ping = 50
 local local_fps = 200
 local local_gun = nil
 local local_following = false
+
+-- True from an auto fire shot sent with "dont render" until its round trip has
+-- closed. Every visual the shot can cause asks this one question, so both fire
+-- modes hide exactly the same things.
+local ragebot_shot_hidden = LPH_NO_VIRTUALIZE(function()
+    return ragebot_silent_shot_time ~= 0 and clock() - ragebot_silent_shot_time <= 0.25 + local_ping/1000
+end)
 
 local purchasing = nil
 local vehicle_data = {}
@@ -9239,6 +9252,11 @@ end
 
 local shot_count = 0
 
+-- Hook auto fire sends through the original namecall the remote hook captures
+-- below. The ragebot calls it once the remote is hooked; until then it is nil
+-- and auto fire falls back to the wrapped event call.
+local hook_shoot = nil
+
 do
     -- >> ( variables )
 
@@ -9247,11 +9265,19 @@ do
     local checkcaller = checkcaller
     local tostring = tostring
 
-    local older_health = nil
-    local older_data = nil
-
     -- >> ( event setup )
 
+    -- Health is the only proof that a shot landed: the server sends no hit
+    -- confirmation the client can read. The health change for a shot can land
+    -- after the shot's own packet, so the read waits for it instead of calling
+    -- a miss the moment the packet arrives.
+    --
+    -- A burst fires several shots before the first health update lands. The
+    -- last health a shot was confirmed against is kept on the player's data and
+    -- a drop to a value already reported belongs to a shot still in flight, not
+    -- to this one. That replaces the old shared pair of "last seen" variables,
+    -- which one call would overwrite while another was still waiting, leaving
+    -- whichever shot lost the race with no marker at all.
     get_bullet_result = LPH_JIT_MAX(function(player, part, old_server_position, aim_position, target_velocity, did_defensive)
         setthreadidentity(8)
 
@@ -9264,27 +9290,70 @@ do
         local old_count = shot_count
         local old_health = data[9]
 
-        local start = clock()
-        repeat wait() until clock() - start > 0.25 + local_ping/1000 or shot_count > old_count
-
-        if data and older_health ~= data[9] or older_data ~= data then
-            older_health = data[9]
-            older_data = data
-
-            local message = old_server_position and part and aim_position and " (pred miss: "..tostring(round((aim_position-part["Position"])["Magnitude"], 1))..") (velocity: "..tostring(round((target_velocity or vector3_zero)["Magnitude"], 1))..(did_defensive and ") (defensive: true)" or ") (defensive: false)")
-
-            if shot_count == old_count then
-                return signals["on_local_bullet_failed"]:Fire(player, part, not local_parts["Head"] and "death" or "unknown"..(message or ""), shot_count)
-            end
-
-            local new_health = data[9]
-
-            if new_health < old_health then
-                return signals["on_local_bullet_confirmed"]:Fire(player, part, tostring(floor(new_health-old_health)), shot_count, message)
-            else
-                return signals["on_local_bullet_failed"]:Fire(player, part, "unknown"..(message or ""), shot_count)
-            end
+        if old_health == nil then
+            return
         end
+
+        local start = clock()
+        local shot_seen_at = nil
+        local grace = 0.05 + local_ping/2000
+
+        repeat
+            wait()
+
+            if shot_count > old_count and not shot_seen_at then
+                shot_seen_at = clock()
+            end
+        until clock() - start > 0.25 + local_ping/1000 or (shot_seen_at and (data[9] ~= old_health or clock() - shot_seen_at > grace))
+
+        local new_health = data[9]
+
+        if new_health == nil then
+            return
+        end
+
+        local message = nil
+
+        if old_server_position and part and aim_position and part["Parent"] then
+            message = " (pred miss: "..tostring(round((aim_position-part["Position"])["Magnitude"], 1))..") (velocity: "..tostring(round((target_velocity or vector3_zero)["Magnitude"], 1))..(did_defensive and ") (defensive: true)" or ") (defensive: false)")
+        end
+
+        if new_health < old_health then
+            local last_health = data[23]
+            local last_time = data[24] or 0
+            local within = clock() - last_time < 0.35 + local_ping/1000
+
+            -- A burst fires several shots before the first health update lands,
+            -- so two checks can see the same drop. The drop is reported once,
+            -- by the first one; a second report of the same value within the
+            -- shot's flight window is that same hit, not a new one.
+            if last_health == new_health and within then
+                return
+            end
+
+            -- A drop that continues from one already reported is measured from
+            -- there, not from this call's older snapshot: the two overlapping
+            -- shots dealt the difference once each, not the whole bar twice.
+            local damage = (within and last_health and last_health > new_health) and (last_health - new_health) or (old_health - new_health)
+
+            data[23] = new_health
+            data[24] = clock()
+
+            return signals["on_local_bullet_confirmed"]:Fire(player, part, tostring(floor(damage)), shot_count, message)
+        end
+
+        -- A heal or a respawn moves health up; it is not a hit, and the next
+        -- drop below it is a real one.
+        if data[23] == nil or new_health > data[23] then
+            data[23] = new_health
+            data[24] = clock()
+        end
+
+        if shot_count == old_count then
+            return signals["on_local_bullet_failed"]:Fire(player, part, not local_parts["Head"] and "death" or "unknown"..(message or ""), shot_count)
+        end
+
+        return signals["on_local_bullet_failed"]:Fire(player, part, "unknown"..(message or ""), shot_count)
     end)
 
     -- >> ( remote hook )
@@ -9362,8 +9431,9 @@ do
 
         -- Auto fire "dont render": the auto fire block skips the beam, so the
         -- local bullet tracer has to skip these shots as well or the line still
-        -- shows while the beam is off.
-        if flags["auto_fire_dont_render"] and ragebot_firing_shot then
+        -- shows while the beam is off. The marker is set by whichever fire mode
+        -- released the shot, so this is the same check for both.
+        if ragebot_shot_hidden() then
             return
         end
 
@@ -9477,14 +9547,20 @@ do
                     -- computes one.
                     aim_position = ragebot_aim_position
 
-                    if aim_position then
+                    -- Only a shot this hub solved is rewritten. A shot the game,
+                    -- a gun script or the triggerbot sent is left exactly as its
+                    -- caller wrote it: it was aimed at what that caller aimed at,
+                    -- and rewriting it here would turn a working shot into one at
+                    -- a target it never saw.
+                    if is_ragebot_shot and aim_position then
                         local handle = args[2]
                         local manip = ragebot_manipulation
 
-                        -- Jitter stays inside the limb. A larger offset moves the
-                        -- reported hit point off the body and the server counts
-                        -- the shot as a miss.
-                        local pos = (manip and manip["position"] or aim_position) + vector3_new(math_random(-3,3)/100, math_random(-3,3)/100, 0)
+                        -- The ragebot already solved the point and the part, and
+                        -- sent them in the call. The jitter is kept on top of it:
+                        -- it is small enough to stay inside the limb. Only a call
+                        -- that arrived without them is solved here.
+                        local pos = (args[4] or (manip and manip["position"]) or aim_position) + vector3_new(math_random(-3,3)/100, math_random(-3,3)/100, 0)
 
                         -- Reported origin. Without the manipulation this is the
                         -- character's own muzzle, the same one the ragebot's shots
@@ -9492,7 +9568,7 @@ do
                         -- the solved point replaces the muzzle: the shot is reported
                         -- from up in the air, in front of the character and able to
                         -- see the limb. Everything else about the call is unchanged.
-                        local origin = (manip and manip["origin"]) or (local_server_position["p"] + vector3_new(0.004, 3.0208, -0.048))
+                        local origin = args[3] or (manip and manip["origin"]) or (local_server_position["p"] + vector3_new(0.004, 3.0208, -0.048))
 
                         -- Sixth argument is the surface normal of the hit, not the
                         -- direction of travel: the game sends the raycast result's
@@ -9505,11 +9581,14 @@ do
                         local Magnitude = dir["Magnitude"]
                         local part = (manip and manip["part"]) or (is_ragebot_shot and args[5]) or (ragebot_target and (ragebot_target[4][resolve_ragebot_hitbox_part(ragebot_target[4])] or ragebot_target[4]["UpperTorso"])) or args[5]
 
-                        if part and ragebot_target then
-                            spawn(get_bullet_result, ragebot_target[2], part, local_server_position["p"], aim_position, ragebot_aim_velocity, ragebot_aim_defensive)
+                        -- The ragebot starts its own result check for this shot and
+                        -- passes it the point the packet actually carries. A second
+                        -- check here would wait on the same health drop and report
+                        -- one hit twice. "dont render" hides this tracer exactly the
+                        -- way it hides the hook mode's own one.
+                        if not ragebot_shot_hidden() then
+                            emit_local_bullet_tracer(pos)
                         end
-
-                        emit_local_bullet_tracer(pos)
 
                         -- Rewrite in place and send everything that came in. The
                         -- call used to be rebuilt with six arguments, which drops
@@ -9519,7 +9598,7 @@ do
                         args[3] = origin
                         args[4] = pos
                         args[5] = part
-                        args[6] = (Magnitude <= 0 or Magnitude ~= Magnitude) and (handle["Position"]-pos)["Unit"] or dir
+                        args[6] = (Magnitude <= 0 or Magnitude ~= Magnitude) and handle and (handle["Position"]-pos)["Unit"] or dir
 
                         return old_namecall(self, unpack(args, 1, shoot_arg_count < 6 and 6 or shoot_arg_count))
                     end
@@ -9573,6 +9652,26 @@ do
     end
 
     setrawmetatable(event, new)
+
+    -- Hook auto fire. The ragebot solves the shot and this sends it straight to
+    -- the event: one packet per trigger pull, nothing rewriting it a second time
+    -- and no tool cooldown in the way, so it fires at the remote mode's rate with
+    -- the same always-fire behaviour.
+    local fire_server = event["FireServer"]
+
+    hook_shoot = LPH_NO_VIRTUALIZE(function(handle, origin, position, part, direction)
+        -- A tracer failure must not look like a failed shot: the packet goes out
+        -- either way, otherwise the caller would send a second one as fallback.
+        -- "dont render" is read from the shot marker, the same source the remote
+        -- path reads, so hook mode hides the tracer exactly when remote does.
+        if not ragebot_shot_hidden() then
+            pcall(emit_local_bullet_tracer, position)
+        end
+
+        -- Dot call: the method is indexed and called directly instead of through
+        -- the __namecall hook, so the shot is not rewritten a second time.
+        return fire_server(event, "ShootGun", handle, origin, position, part, direction)
+    end)
 end
 
 -- > ( shop )
@@ -11955,6 +12054,11 @@ do
         data[10] = floor(humanoid["MaxHealth"])
         data[11] = old_health
 
+        -- A new character starts a new health bar, so the last health a shot
+        -- was confirmed against belongs to the old one and is cleared.
+        data[23] = old_health
+        data[24] = 0
+
         signals["on_player_character_added"]:Fire(data, character)
         signals["on_player_health_changed"]:Fire(data, old_health, -old_health)
 
@@ -12168,6 +12272,14 @@ do
                 chams[i] = nil
             end
             data[12] = nil
+        end
+
+        local material_highlight = data[22]
+
+        if material_highlight then
+            material_highlight["Adornee"] = nil
+            destroy(material_highlight)
+            data[22] = nil
         end
 
         if ragebot_target == data then
@@ -13344,6 +13456,15 @@ end
         wait()
         local name = object["Name"]
         if name == "BULLET_RAYS" then
+            -- Auto fire "dont render": the game replicates the shot's ray back to
+            -- the shooter a round trip after it was sent, when the firing block
+            -- has long moved on. Drop it against the shot marker here instead of
+            -- drawing it as a local tracer, the same rule for both fire modes.
+            if get_attribute(object, "OwnerCharacter") == local_name and ragebot_shot_hidden() then
+                destroy(object)
+                return
+            end
+
             local beam = find_first_child_of_class(object, "Beam")
             if beam then
                 local cframe = beam["Attachment1"]["WorldCFrame"]
@@ -15748,6 +15869,16 @@ end
         local show_offset = vector3_new(0,1.5,0)
         local create_drawing = (identifyexecutor() == "Swift" or identifyexecutor() == "Potassium") and create_fake_drawing or create_real_drawing
 
+        -- The ragebot report is a drawing of its own, set in the ESP's own font
+        -- setting, so it reads like the rest of the on-screen text instead of a
+        -- second line in whatever font the damage number happens to use.
+        local esp_font = LPH_NO_VIRTUALIZE(function()
+            local value = flags["small_font"]
+            local name = type(value) == "table" and value[1] or value
+
+            return tonumber(name) or 2
+        end)
+
         local do_damage_number = LPH_JIT_MAX(function(player, part, damage, _, message)
             local data = player_data[player]
 
@@ -15758,9 +15889,19 @@ end
             local transparency = -flags["damage_number_transparency"]+1
             local color = data[18] and flags["damage_number_lethal_color"] or flags["damage_number_color"]
             local text = damage
+            local info_text = nil
 
             if flags["damage_number_show_ragebot_data"] and message then
-                text = damage..message
+                -- What the resolver did with the shot, compact enough to sit
+                -- under the number: how far the aim point missed, how fast the
+                -- target was moving, and whether the shot was a defensive one.
+                local miss, velocity, defensive = message:match("pred miss:%s*([%d%.%-]+)%)%s*%(velocity:%s*([%d%.%-]+)%)%s*%(defensive:%s*(%a+)%)")
+
+                if miss then
+                    info_text = "miss "..miss.."   vel "..velocity..(defensive == "true" and "   def" or "")
+                else
+                    info_text = message:gsub("^%s+", ""):gsub("%s+$", "")
+                end
             end
 
             local number = create_drawing("Text", {
@@ -15774,6 +15915,22 @@ end
                 ["Font"] = damage_number_font,
                 ["Visible"] = true
             })
+
+            local info = nil
+
+            if info_text then
+                info = create_drawing("Text", {
+                    ["Text"] = info_text,
+                    ["Size"] = 11,
+                    ["Color"] = color,
+                    ["OutlineColor"] = damage_number_outline_color,
+                    ["Transparency"] = 1,
+                    ["ZIndex"] = 5499,
+                    ["Outline"] = true,
+                    ["Font"] = esp_font(),
+                    ["Visible"] = true
+                })
+            end
 
             local part_position = part["Position"]
             local new_position = part_position
@@ -15802,8 +15959,17 @@ end
                     end
 
                     number["Position"] = vector2_new(position["X"] + 13, position["Y"])
+
+                    if info then
+                        info["Position"] = vector2_new(position["X"] + 13, position["Y"] + 14)
+                        info["Transparency"] = clamp((number["Transparency"] or 0) + 0.15, 0, 1)
+                    end
                 else
                     number["Visible"] = false
+
+                    if info then
+                        info["Visible"] = false
+                    end
                 end
             end
 
@@ -15818,6 +15984,10 @@ end
                 end
 
                 number:Destroy()
+
+                if info then
+                    info:Destroy()
+                end
             end)
         end)
 
@@ -17304,22 +17474,70 @@ do
     end
 end
 
--- The "glow" and "highlight" toggles raise the preset to the first level that
--- renders Highlight and bloom, never higher. Below it the client skips the whole
--- Highlight pass and nothing shows on the body.
+-- Every visual below draws through the bloom pass or the Highlight pass, and
+-- both are skipped under the floor: neon loses its glow, forcefield comes out
+-- invisible, and a Highlight does not appear at all. That is what makes the
+-- material toggles look dead on a low preset, so the floor is requested while
+-- any of them is on, not only for the two explicit highlight toggles.
+local render_quality_feature_on = function()
+    return flags["material_glow"]
+        or flags["highlight"]
+        or flags["character_highlight"]
+        or (flags["esp"] and flags["material"])
+        or flags["local_material"]
+        or flags["hit_chams"]
+        or flags["backtrack"]
+end
+
+-- The preset the floor replaced, kept raw: some executors expose QualityLevel as
+-- an enum item and only that exact value can be written back.
+local render_quality_before = nil
+
+-- Raises the preset to the first level that renders Highlight and bloom, never
+-- higher, and hands the old preset back once nothing needs it any more.
 local raise_render_quality = function()
-    if not (flags["material_glow"] or flags["highlight"] or flags["character_highlight"]) or not render_settings then
+    if not render_settings then
         return
     end
 
     local level = get_render_quality()
 
-    if not level or level >= highlight_render_quality then
+    if not level then
+        return
+    end
+
+    if render_quality_feature_on() then
+        if level < highlight_render_quality then
+            if render_quality_before == nil then
+                pcall(function()
+                    render_quality_before = render_settings.Rendering.QualityLevel
+                end)
+            end
+
+            pcall(function()
+                render_settings.Rendering.QualityLevel = minimum_render_quality_item or highlight_render_quality
+            end)
+        end
+
+        return
+    end
+
+    local original = render_quality_before
+
+    if original == nil then
+        return
+    end
+
+    render_quality_before = nil
+
+    -- Only undo a raise that is still standing. If the preset moved again it is
+    -- the user's, not ours.
+    if level ~= highlight_render_quality then
         return
     end
 
     pcall(function()
-        render_settings.Rendering.QualityLevel = minimum_render_quality_item or highlight_render_quality
+        render_settings.Rendering.QualityLevel = original
     end)
 end
 
@@ -17362,6 +17580,7 @@ end
     menu_references["material"] = menu_references["esp_section"]:create_element({["name"] = "material"}, {["toggle"] = {["flag"] = "material"}})
         menu_references["material_settings"] = menu_references["material"]:create_settings()
         menu_references["material_value"] = menu_references["material_settings"]:create_element({["name"] = "material"}, {["dropdown"] = {["options"] = {"neon", "forcefield"}, ["requires_one"] = true, ["flag"] = "material_value", ["default"] = {"neon"}}})
+        menu_references["material_behind_walls"] = menu_references["material_settings"]:create_element({["name"] = "behind walls"}, {["toggle"] = {["flag"] = "material_behind_walls", ["default"] = false}})
         menu_references["material_glow"] = menu_references["material_settings"]:create_element({["name"] = "glow (quality 3)"}, {["toggle"] = {["flag"] = "material_glow"}})
         menu_references["material_color"] = menu_references["material_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "material_color", ["transparency_flag"] = "material_transparency", ["default_color"] = color3_fromrgb(249, 217, 255), ["default_transparency"] = 0.2}})
         menu_references["enemy_material_color"] = menu_references["material_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_material_color", ["transparency_flag"] = "enemy_material_transparency", ["default_color"] = color3_fromrgb(249, 217, 255), ["default_transparency"] = 0.2}})
@@ -18166,6 +18385,13 @@ end
         tween(data, {[15] = new_armor}, "sine", out, 0.15)
     end)
 
+    -- The material's through-wall pass replaces the boxy chams silhouette while
+    -- it is on: the neon body is the intended look, and the part boxes drawn on
+    -- top of it hide exactly that.
+    local material_replaces_chams = LPH_NO_VIRTUALIZE(function()
+        return do_material and flags["esp"] and flags["material_behind_walls"] ~= false
+    end)
+
     local create_chams = LPH_NO_VIRTUALIZE(function(data)
         local parts = data[4]
 
@@ -18185,7 +18411,7 @@ end
             local part = body_parts[i]
             local character_part = parts[part]
             chams[#chams+1] = create_instance("BoxHandleAdornment", {
-                ["Visible"] = true,
+                ["Visible"] = not material_replaces_chams(),
                 ["Adornee"] = character_part,
                 ["Transparency"] = transparency,
                 ["AdornCullingMode"] = culling_mode,
@@ -18207,12 +18433,15 @@ end
         if not chams or not parts then
             return
         end
+        local visible = not material_replaces_chams()
+
         for i = 1, #body_parts do
             local cham = chams[i]
             local local_part = parts[body_parts[i]]
             if cham then
                 cham["Adornee"] = local_part
                 cham["Size"] = local_part and local_part["Size"] + chams_offset or chams_offset
+                cham["Visible"] = visible
             end
         end
     end)
@@ -18225,7 +18454,7 @@ end
     local update_highlight_fallback = LPH_NO_VIRTUALIZE(function(data)
         local adornment = data[21]
 
-        if not using_adornment_highlight or not do_highlight or do_chams or not data[3] then
+        if not using_adornment_highlight or not do_highlight or do_chams or not data[3] or material_replaces_chams() then
             if adornment then
                 adornment["Adornee"] = nil
                 destroy(adornment)
@@ -18314,6 +18543,15 @@ end
         if data[8] then
             return
         end
+
+        -- One Highlight per model. While the through-wall material is on it owns
+        -- that slot and draws the body in the material colour; the highlight
+        -- feature stays out of the way until the material is off or stops
+        -- drawing behind walls.
+        if do_material and flags["esp"] and flags["material_behind_walls"] ~= false and data[3] then
+            return
+        end
+
         local alt_information = alt_information[data[1]]
         local character = data[3]
 
@@ -18327,6 +18565,17 @@ end
             Adornee = character,
             Parent = hui
         })
+
+        -- The engine draws one Highlight per model. This one owns the slot, so
+        -- the material's through-wall silhouette steps aside until the highlight
+        -- feature is off again.
+        local material_highlight = data[22]
+
+        if material_highlight then
+            material_highlight["Adornee"] = nil
+            destroy(material_highlight)
+            data[22] = nil
+        end
     end)
 
     -- Highlight can be dropped by the client (respawn, appearance reload, or a
@@ -18579,6 +18828,166 @@ end
 
     local plastic = Enum["Material"]["Plastic"]
     local forcefield = Enum["Material"]["ForceField"]
+    local neon = Enum["Material"]["Neon"]
+
+    -- Material seen through walls. The body material is drawn by the depth-tested
+    -- pass, so neon disappears behind cover. A Highlight is drawn by the engine's
+    -- own pass and an AlwaysOnTop one is not occluded, which paints the same body
+    -- silhouette in the material colour: a translucent fill plus a brighter rim
+    -- that reads as the glow. Kept at data[22]. A model can only render one
+    -- Highlight, so this takes that slot from the highlight feature while it is
+    -- on and hands it back when it is off.
+    local material_highlight_rim = LPH_NO_VIRTUALIZE(function(color)
+        return color3_lerp(color, color3_fromrgb(255, 255, 255), 0.45)
+    end)
+
+    local destroy_material_highlight = LPH_NO_VIRTUALIZE(function(data)
+        if type(data) ~= "table" then
+            return
+        end
+
+        local highlight = data[22]
+
+        if not highlight then
+            return
+        end
+
+        highlight["Adornee"] = nil
+        destroy(highlight)
+
+        data[22] = nil
+    end)
+
+    -- The through-wall pass is the neon body itself, not a faint wash: the fill
+    -- keeps the material colour so the character reads through cover exactly the
+    -- way the local neon model reads in the open, and the rim carries the glow.
+    -- Opacity follows the material transparency but never collapses into the
+    -- invisible cut-out the old "transparency + 0.5" did at high settings.
+    local material_highlight_colors = LPH_NO_VIRTUALIZE(function(data)
+        local information = alt_information[data[1]]
+        local color = information[7]
+        local transparency = information[8]
+        local glow = flags["material_glow"] and true or false
+        local fill = clamp(transparency * 0.45 + (glow and 0.05 or 0.15), 0, 0.7)
+        local outline = glow and material_highlight_rim(color) or color3_lerp(color, color3_fromrgb(255, 255, 255), 0.2)
+        local outline_transparency = glow and 0 or clamp(transparency * 0.5, 0, 0.55)
+
+        return color, fill, outline, outline_transparency
+    end)
+
+    -- A model renders one Highlight. The material's through-wall pass takes that
+    -- slot: the highlight feature's object is dropped so the engine draws the
+    -- neon body in the material colour instead of the highlight's white outline.
+    local take_highlight_slot = LPH_NO_VIRTUALIZE(function(data)
+        local highlight = data[8]
+
+        if highlight then
+            highlight["Adornee"] = nil
+            highlight["Parent"] = nil
+            destroy(highlight)
+
+            data[8] = nil
+        end
+
+        -- The box outline would otherwise sit on top of the material body.
+        local chams = data[12]
+
+        if chams then
+            for i = 1, #chams do
+                chams[i]["Visible"] = false
+            end
+        end
+    end)
+
+    local create_material_highlight = LPH_NO_VIRTUALIZE(function(data)
+        local character = data[3]
+
+        if not character then
+            return
+        end
+
+        destroy_material_highlight(data)
+        take_highlight_slot(data)
+
+        local color, fill, outline, outline_transparency = material_highlight_colors(data)
+
+        data[22] = create_instance("Highlight", {
+            ["FillColor"] = color,
+            ["FillTransparency"] = fill,
+            ["OutlineColor"] = outline,
+            ["OutlineTransparency"] = outline_transparency,
+            ["DepthMode"] = Enum["HighlightDepthMode"]["AlwaysOnTop"],
+            ["Enabled"] = true,
+            ["Adornee"] = character,
+            ["Parent"] = hui
+        })
+    end)
+
+    local update_material_highlight = LPH_NO_VIRTUALIZE(function(data)
+        local highlight = data[22]
+        local character = data[3]
+
+        if not highlight then
+            return
+        end
+
+        if not character then
+            destroy_material_highlight(data)
+            return
+        end
+
+        take_highlight_slot(data)
+
+        if highlight["Adornee"] ~= character then
+            highlight["Adornee"] = character
+        end
+
+        local color, fill, outline, outline_transparency = material_highlight_colors(data)
+
+        highlight["FillColor"] = color
+        highlight["FillTransparency"] = fill
+        highlight["OutlineColor"] = outline
+        highlight["OutlineTransparency"] = outline_transparency
+
+        if not highlight["Enabled"] then
+            highlight["Enabled"] = true
+        end
+    end)
+
+    -- Gives the highlight feature its model Highlight back when the material no
+    -- longer owns the slot (material off, behind walls off, or ESP off).
+    local restore_highlight = LPH_NO_VIRTUALIZE(function(data)
+        if do_highlight and data[3] and not data[8] then
+            create_highlight(data)
+        end
+
+        local chams = data[12]
+
+        if chams then
+            for i = 1, #chams do
+                chams[i]["Visible"] = true
+            end
+        end
+    end)
+
+    -- Brings every player's through-wall material in line with the toggles that
+    -- own it: material, behind walls and glow. The material owns the model's one
+    -- Highlight while it draws behind walls, and hands the slot back to the
+    -- highlight feature when it does not.
+    local refresh_material_highlights = LPH_NO_VIRTUALIZE(function()
+        for player, data in player_data do
+            if do_material and flags["esp"] and flags["material_behind_walls"] ~= false and data[3] then
+                if data[22] then
+                    update_material_highlight(data)
+                else
+                    create_material_highlight(data)
+                end
+            else
+                destroy_material_highlight(data)
+                restore_highlight(data)
+            end
+        end
+    end)
 
     local remove_material = LPH_NO_VIRTUALIZE(function(data, character, parts, description)
         local character = character or data[3]
@@ -18677,6 +19086,8 @@ end
                     end
                 end
             end
+
+            destroy_material_highlight(data)
         end
     end)
 
@@ -18693,6 +19104,14 @@ end
 
             wait(0.2)
 
+            -- If the preset could not be raised (a client that refuses the write)
+            -- the pass is still skipped, and forcefield is the material that
+            -- renders as nothing there. Neon keeps the body solid, so it stands
+            -- in for forcefield rather than leaving a hole in the character.
+            local floor_missing = render_settings ~= nil and highlight_needs_adornments()
+            local body_material = floor_missing and material == forcefield and neon or material
+            local head_material = floor_missing and neon or forcefield
+
             local alt_information = alt_information[data[1]]
             local color = alt_information[7]
             local transparency = alt_information[8]
@@ -18702,7 +19121,7 @@ end
                 local part = parts[name]
 
                 if part then
-                    part["Material"] = name == "Head" and forcefield or material
+                    part["Material"] = name == "Head" and head_material or body_material
                     part["Color"] = color
                     if part["Transparency"] ~= 1 then
                         part["Transparency"] = transparency
@@ -18732,7 +19151,7 @@ end
                             handle:SetAttribute(material_attribute, handle["TextureID"])
                         end
 
-                        handle["Material"] = material
+                        handle["Material"] = body_material
                         handle["TextureID"] = ""
                         handle["Color"] = color
                         handle["Transparency"] = transparency
@@ -18759,6 +19178,21 @@ end
             if shirt_graphic and shirt_graphic["Graphic"] ~= "" then
                 shirt_graphic:SetAttribute("a", shirt_graphic["Graphic"])
                 shirt_graphic["Graphic"] = ""
+            end
+
+            -- The through-wall pass follows the same colour and glow as the body
+            -- material, and takes the model's single Highlight slot so the body
+            -- is drawn in the material colour rather than the highlight
+            -- feature's outline.
+            if flags["material_behind_walls"] ~= false then
+                if data[22] then
+                    update_material_highlight(data)
+                else
+                    create_material_highlight(data)
+                end
+            else
+                destroy_material_highlight(data)
+                restore_highlight(data)
             end
         end
     end)
@@ -18902,12 +19336,18 @@ end
                 local_player["CharacterAppearanceLoaded"]:Wait()
             end
 
+            -- Same fallback as the ESP material: a skipped pass leaves forcefield
+            -- invisible, and the local body is the last thing that should vanish.
+            local floor_missing = render_settings ~= nil and highlight_needs_adornments()
+            local body_material = floor_missing and local_material_type == forcefield and neon or local_material_type
+            local head_material = floor_missing and neon or forcefield
+
             if local_material_on_character_added then
                 for _, name in body_parts do
                     local part = local_parts[name]
 
                     if part then
-                        part["Material"] = name == "Head" and forcefield or local_material_type
+                        part["Material"] = name == "Head" and head_material or body_material
                         part["Color"] = local_material_color
                         if part["Transparency"] ~= 1 then
                             part["Transparency"] = local_model_transparency
@@ -18924,7 +19364,7 @@ end
                                 handle:SetAttribute(material_attribute, handle["TextureID"])
                             end
 
-                            handle["Material"] = local_material_type
+                            handle["Material"] = body_material
                             handle["TextureID"] = ""
                             handle["Color"] = local_material_color
                             handle["Transparency"] = local_model_transparency
@@ -18970,6 +19410,10 @@ end
             end
 
             if value then
+                -- The floor has to be up before the material is written, or the
+                -- first body it touches is the one that comes out invisible.
+                raise_render_quality()
+
                 local_material_on_character_added = create_connection(signals["on_local_character_loaded"], apply_local_material)
                 local_material_on_description_changed = create_connection(signals["on_local_character_description_changed"], apply_local_material)
 
@@ -19100,7 +19544,13 @@ end
 
                 if do_material and data[3] then
                     remove_material(data)
+                else
+                    destroy_material_highlight(data)
                 end
+
+                -- The material took the model's Highlight slot while ESP was
+                -- on; the highlight feature gets it back if it is still on.
+                restore_highlight(data)
             end
 
             if character_added_connection then
@@ -19556,6 +20006,8 @@ end
 
                 highlight_character_added_connection = create_connection(signals["on_player_character_added"], update_highlight)
             end
+
+            refresh_material_highlights()
         end))
 
         create_connection(menu_references["health_text"]["on_toggle_change"], LPH_NO_VIRTUALIZE(function(value)
@@ -19833,10 +20285,22 @@ end
             if value then
                 raise_render_quality()
             end
+
+            refresh_material_highlights()
         end)
+
+        create_connection(menu_references["material_behind_walls"]["on_toggle_change"], LPH_NO_VIRTUALIZE(function(value)
+            refresh_material_highlights()
+        end))
 
         create_connection(menu_references["material"]["on_toggle_change"], LPH_NO_VIRTUALIZE(function(value)
             do_material = value
+
+            if value then
+                -- Same floor as the local material: below it neon is flat and
+                -- forcefield disappears, which makes the toggle look dead.
+                raise_render_quality()
+            end
 
             if material_on_player_character_added then
                 material_on_player_character_added:Disconnect()
@@ -19858,6 +20322,8 @@ end
                     end
                 end
             end
+
+            refresh_material_highlights()
         end))
     end
 
@@ -21113,6 +21579,150 @@ do
     end
 end
 
+-- >> ( fov follow )
+
+-- The drawn field of view circles can sit on the cursor or on the locked target.
+-- "target" projects a world point into the drawing space and reports whether that
+-- point is on screen: a followed point that left the viewport takes its circle
+-- out of sight with it instead of pinning it to the screen edge.
+local get_fov_follow_anchor = LPH_NO_VIRTUALIZE(function(follow, target_position)
+    local fallback = get_mouse_location(user_input_service)
+    local world_position = follow == "target" and target_position or nil
+
+    if not world_position then
+        return fallback, true
+    end
+
+    local position, on_screen = world_to_viewport_point(camera, world_position)
+
+    if not on_screen then
+        -- Only a point behind the camera has no usable screen position; the
+        -- cursor stands in for it. A point in front but outside the viewport
+        -- keeps its true projection, and the caller hides the circle there
+        -- rather than clamping it to the border -- a target that left the view
+        -- stops painting a ring on the edge of the screen.
+        if typeof(position) ~= "Vector3" or position["Z"] <= 0 then
+            return fallback, false
+        end
+
+        return vector2_new(position["X"], position["Y"]), false
+    end
+
+    return vector2_new(position["X"], position["Y"]), true
+end)
+
+-- The point a followed target is drawn around. The head is what the target is
+-- recognised by and the part "view target" locks the camera to, so every
+-- target-follow circle sits there. Resolving the aim solver's hitbox instead
+-- made the circle jump between limbs when it was set to "randomize", and sit on
+-- the root/legs -- visibly below the character and detached from the view -- for
+-- "root" and the default fallback. A missing head (decapitation) walks down the
+-- torso so the circle stays on the body.
+local get_fov_target_anchor = LPH_NO_VIRTUALIZE(function(target)
+    local parts = target and target[4]
+
+    if not parts then
+        return nil
+    end
+
+    local head = parts["Head"]
+
+    if head then
+        return head["Position"]
+    end
+
+    local upper_torso = parts["UpperTorso"]
+
+    if upper_torso then
+        return upper_torso["Position"]
+    end
+
+    local root = parts["HumanoidRootPart"]
+
+    return root and root["Position"] or nil
+end)
+
+-- The point a "target" anchor follows. The feature's own point comes first.
+-- When it has none -- the target is outside that feature's own field of view --
+-- the selected ragebot target's head stands in, so a locked target is followed
+-- by every circle instead of only by the one that locked it. The ragebot's
+-- solved point is the last resort: it can be a predicted or defensive position
+-- that is not where the target actually is.
+local get_fov_follow_target_position = LPH_NO_VIRTUALIZE(function(position)
+    if position and position ~= vector3_zero then
+        return position
+    end
+
+    local target = ragebot_target
+
+    if target then
+        local anchor = get_fov_target_anchor(target)
+
+        if anchor then
+            return anchor
+        end
+    end
+
+    if ragebot_aim_position and ragebot_aim_position ~= vector3_zero then
+        return ragebot_aim_position
+    end
+
+    return nil
+end)
+
+-- Fraction of the way to the anchor on this frame. 100% sits on it immediately,
+-- lower values drag the circle behind, easing the same way at any framerate.
+local get_fov_follow_alpha = LPH_NO_VIRTUALIZE(function(lerp, dt)
+    if lerp >= 1 then
+        return 1
+    end
+
+    return 1 - (1 - lerp) ^ (dt * 60)
+end)
+
+-- Moves one feature's circle (and its outline / dead zone) onto its anchor. The
+-- flag names are passed in and read here per frame: a loaded config writes the
+-- flags without firing the dropdown callback, so a cached copy would keep the
+-- old anchor.
+--
+-- Returns whether the anchor is on screen. An off-screen anchor freezes the
+-- circle where it left the viewport and the caller hides the drawing, so a
+-- circle whose target is out of view stops showing at all -- it is not pinned to
+-- the border -- and comes back in at the edge it left through.
+local update_fov_circle_follow = LPH_NO_VIRTUALIZE(function(circle, outline, dead_zone, follow_flag, lerp_flag, follow_position, dt)
+    local follow_flags = flags[follow_flag]
+    local follow = follow_flags and follow_flags[1] or "mouse"
+    local lerp = clamp((flags[lerp_flag] or 27)/100, 0.01, 1)
+    local old_position = circle["Position"]
+    local target_position = follow == "target" and get_fov_follow_target_position(follow_position) or nil
+    local goal_position, on_screen = get_fov_follow_anchor(follow, target_position)
+
+    if not on_screen then
+        return false
+    end
+
+    local new_position = old_position + (goal_position - old_position) * get_fov_follow_alpha(lerp, dt)
+
+    -- A circle that has not been placed yet sits at the drawing origin. Snapping
+    -- on its first update keeps it from crawling in from the screen corner when
+    -- the menu is opened, which read as the follow being stuck.
+    if old_position["X"] == 0 and old_position["Y"] == 0 then
+        new_position = goal_position
+    end
+
+    circle["Position"] = new_position
+
+    if outline then
+        outline["Position"] = new_position
+    end
+
+    if dead_zone then
+        dead_zone["Position"] = new_position
+    end
+
+    return true
+end)
+
 -- > ( ragebot / hvh )
 
 local backtrack_data = {}
@@ -21122,6 +21732,13 @@ local backtrack_data = {}
         menu_references["ragebot_enabled"] = menu_references["general_section"]:create_element({["name"] = "ragebot"}, {["toggle"] = {["flag"] = "ragebot"}})
         menu_references["auto_fire"] = menu_references["general_section"]:create_element({["name"] = "auto fire"}, {["toggle"] = {["flag"] = "auto_fire", ["default"] = false}})
         menu_references["auto_fire_settings"] = menu_references["auto_fire"]:create_settings()
+        -- Two ways to put the shot on the server, both firing on the same fire
+        -- cooldown and with the same always-fire behaviour. "remote" sends the
+        -- packet through the event, so it passes the namecall hook on the way
+        -- out. "hook" sends the solved shot through the event method itself, from
+        -- the hook layer: nothing rewrites it a second time and no tool cooldown
+        -- or activation gate sits between the trigger and the server.
+        menu_references["auto_fire_mode"] = menu_references["auto_fire_settings"]:create_element({["name"] = "mode"}, {["dropdown"] = {["flag"] = "auto_fire_mode", ["options"] = {"remote", "hook"}, ["default"] = {"remote"}, ["requires_one"] = true}})
         menu_references["auto_fire_at_target_vehicle"] = menu_references["auto_fire_settings"]:create_element({["name"] = "at target vehicle"}, {["toggle"] = {["flag"] = "auto_fire_at_target_vehicle", ["default"] = true}})
         menu_references["auto_fire_at_backtrack"] = menu_references["auto_fire_settings"]:create_element({["name"] = "at backtrack"}, {["toggle"] = {["flag"] = "auto_fire_at_backtrack", ["default"] = false}})
         menu_references["auto_fire_always_fire"] = menu_references["auto_fire_settings"]:create_element({["name"] = "always fire"}, {["toggle"] = {["flag"] = "auto_fire_always_fire", ["default"] = true}})
@@ -21195,7 +21812,10 @@ local backtrack_data = {}
         menu_references["target_selection_target_when_shot_at_force"] = menu_references["target_selection_settings"]:create_element({["name"] = "force"}, {["toggle"] = {["flag"] = "target_selection_target_when_shot_at_force"}})
         menu_references["target_selection_target_when_shot_at_force"]:set_visible(false)
         menu_references["target_selection_untarget_when"] = menu_references["target_selection_settings"]:create_element({["name"] = "untarget when"}, {["dropdown"] = {["flag"] = "target_selection_untarget_when", ["default"] = {"invulnerable", "dead"}, ["options"] = {"better target", "invulnerable", "knocked", "flung", "dead"}, ["multi"] = true}})
-        menu_references["target_statuses"] = menu_references["target_selection_settings"]:create_element({["name"] = "target statuses"}, {["dropdown"] = {["flag"] = "target_statuses", ["options"] = {"friendly", "neutral", "enemy"}, ["default"] = {"neutral"}, ["multi"] = true, ["requires_one"] = true}})
+        -- Max coverage out of the box: every status is targetable unless the user
+        -- trims it. The player list still colors and can still mark players, it
+        -- just does not gate the ragebot on a fresh install.
+        menu_references["target_statuses"] = menu_references["target_selection_settings"]:create_element({["name"] = "target statuses"}, {["dropdown"] = {["flag"] = "target_statuses", ["options"] = {"friendly", "neutral", "enemy"}, ["default"] = {"friendly", "neutral", "enemy"}, ["multi"] = true, ["requires_one"] = true}})
         menu_references["target_selection_prioritize_by"] = menu_references["target_selection_settings"]:create_element({["name"] = "prioritize by"}, {["dropdown"] = {["flag"] = "prioritize_by", ["options"] = {"closest to character", "closest to mouse", "highest wanted", "lowest health", "random"}, ["default"] = {"closest to mouse"}}})
         menu_references["target_selection_ignore_if"] = menu_references["target_selection_settings"]:create_element({["name"] = "ignore if"}, {["dropdown"] = {["flag"] = "ignore_if", ["options"] = {"invulnerable", "knocked", "in void"}, ["default"] = {"invulnerable"}, ["multi"] = true}})
         menu_references["target_selection_target_distance"] = menu_references["target_selection_settings"]:create_element({["name"] = "target distance"}, {["slider"] = {["flag"] = "target_selection_target_distance", ["default"] = 2500, ["max_text"] = "max", ["min"] = 5, ["max"] = 2500, ["suffix"] = " studs"}})
@@ -21213,7 +21833,8 @@ local backtrack_data = {}
         menu_references["face_target"] = menu_references["visualization_section"]:create_element({["name"] = "face target"}, {["toggle"] = {["flag"] = "face_target"}})
         menu_references["ragebot_field_of_view_show_fov"] = menu_references["visualization_section"]:create_element({["name"] = "show fov"}, {["toggle"] = {["flag"] = "ragebot_field_of_view_show_fov"}})
         menu_references["ragebot_field_of_view_show_fov_settings"] = menu_references["ragebot_field_of_view_show_fov"]:create_settings()
-        menu_references["ragebot_field_of_view_follow_target"] = menu_references["ragebot_field_of_view_show_fov_settings"]:create_element({["name"] = "follow target"}, {["toggle"] = {["flag"] = "ragebot_field_of_view_follow_target"}})
+        menu_references["ragebot_field_of_view_follow"] = menu_references["ragebot_field_of_view_show_fov_settings"]:create_element({["name"] = "follow"}, {["dropdown"] = {["flag"] = "ragebot_field_of_view_follow", ["options"] = {"mouse", "target"}, ["default"] = {"mouse"}, ["requires_one"] = true}})
+        menu_references["ragebot_field_of_view_lerp"] = menu_references["ragebot_field_of_view_show_fov_settings"]:create_element({["name"] = "lerp"}, {["slider"] = {["flag"] = "ragebot_field_of_view_lerp", ["min"] = 1, ["max"] = 100, ["suffix"] = "%", ["default"] = 27, ["max_text"] = "instant"}})
         menu_references["ragebot_field_of_view_color"] = menu_references["ragebot_field_of_view_show_fov_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "ragebot_field_of_view_color", ["default_color"] = color3_fromrgb(181, 255, 246), ["default_transparency"] = 0.8, ["transparency_flag"] = "ragebot_field_of_view_transparency"}})
         menu_references["ragebot_field_of_view_outline"] = menu_references["ragebot_field_of_view_show_fov_settings"]:create_element({["name"] = "outline"}, {["colorpicker"] = {["color_flag"] = "ragebot_field_of_view_outline_color", ["default_color"] = color3_fromrgb(15, 15, 15), ["default_transparency"] = 0.4, ["transparency_flag"] = "ragebot_field_of_view_outline_transparency"}})
         menu_references["ragebot_field_of_view_active_color"] = menu_references["ragebot_field_of_view_show_fov_settings"]:create_element({["name"] = "active color"}, {["colorpicker"] = {["color_flag"] = "ragebot_field_of_view_active_color", ["default_color"] = color3_fromrgb(233, 44, 44), ["default_transparency"] = 0.8, ["transparency_flag"] = "ragebot_field_of_view_active_transparency"}})
@@ -21306,10 +21927,13 @@ local backtrack_data = {}
         menu_references["control_settings"] = menu_references["control"]:create_settings()
         menu_references["control_chat_replies"] = menu_references["control_settings"]:create_element({["name"] = "chat replies"}, {["toggle"] = {["flag"] = "control_chat_replies", ["default"] = true}})
         --]]
-    -- >> ( ragebot )
+-- >> ( ragebot )
 
     local automatic = false
     local do_notification = false
+    -- Which path auto fire sends through. The dropdown writes the flag before
+    -- this runs, so a config without it still starts on remote.
+    local auto_fire_mode = (flags["auto_fire_mode"] and flags["auto_fire_mode"][1]) or "remote"
     local target_distance = true
     local ragebot_field_of_view = true
     local ragebot_untarget_when_better_target = false
@@ -21325,9 +21949,9 @@ local backtrack_data = {}
     local target_velocity = nil
     local targets = {}
 
-    local target_friendly = false
+    local target_friendly = true
     local target_neutral = true
-    local target_enemy = false
+    local target_enemy = true
 
     local last_refresh = clock()
     local last_fire = clock()
@@ -21510,6 +22134,29 @@ local backtrack_data = {}
         local raycast = workspace["Raycast"]
         local params = manipulation["params"]
 
+        -- The filter is written only when what it is built from changes, and is
+        -- shared by the solve and by the aim fallback below, so either can cast a
+        -- ray that ignores the local character and workspace.Ignored.
+        manipulation["ensure_filter"] = LPH_NO_VIRTUALIZE(function()
+            local ignored = find_first_child(workspace, "Ignored")
+
+            if not manipulation["filter_ready"] or manipulation["filter_character"] ~= local_character or manipulation["filter_ignored"] ~= ignored then
+                local filter = {local_character}
+
+                if ignored then
+                    filter[#filter + 1] = ignored
+                end
+
+                params["FilterType"] = Enum["RaycastFilterType"]["Exclude"]
+                params["RespectCanCollide"] = true
+                params["FilterDescendantsInstances"] = filter
+
+                manipulation["filter_ready"] = true
+                manipulation["filter_character"] = local_character
+                manipulation["filter_ignored"] = ignored
+            end
+        end)
+
         -- A point counts as visible when the ray reaches it without hitting
         -- anything, or only hits the target's own character. The character
         -- itself and workspace.Ignored are filtered out, so a roof or a wall is
@@ -21549,27 +22196,9 @@ local backtrack_data = {}
             return nil
         end
 
-        -- The filter is written only when what it is built from changes. It used
-        -- to be written on every solve, which copies the list into the engine
-        -- each time.
-        local ignored = find_first_child(workspace, "Ignored")
-
-        if not manipulation["filter_ready"] or manipulation["filter_character"] ~= local_character or manipulation["filter_ignored"] ~= ignored then
-            local params = manipulation["params"]
-            local filter = {local_character}
-
-            if ignored then
-                filter[#filter + 1] = ignored
-            end
-
-            params["FilterType"] = Enum["RaycastFilterType"]["Exclude"]
-            params["RespectCanCollide"] = true
-            params["FilterDescendantsInstances"] = filter
-
-            manipulation["filter_ready"] = true
-            manipulation["filter_character"] = local_character
-            manipulation["filter_ignored"] = ignored
-        end
+        -- The filter is shared with the aim fallback and written only when what
+        -- it is built from changes.
+        manipulation["ensure_filter"]()
 
         local visible = manipulation["visible"]
         local hitboxes = manipulation["calculated_hitboxes"]
@@ -22157,6 +22786,11 @@ local backtrack_data = {}
 
     local last_target_list_target = nil
 
+    -- The character the list target was selected on. A new character for the same
+    -- player means they respawned, which moves the loop on to the next name even
+    -- if the death flag was never seen going up between two frames.
+    local target_list_characters = {}
+
     -- Next alive player in the list after `current`; wraps around the end.
     local get_target_list_target = LPH_NO_VIRTUALIZE(function(current)
         local list = {}
@@ -22339,15 +22973,48 @@ local backtrack_data = {}
 
         target_list_only = next(ragebot_targets) ~= nil
 
-        -- Cycle the player list targets. When the current one dies the next
-        -- alive name is picked, and the list wraps after the last one.
-        if target_list_only and (not target or target[7]) and flags["ragebot"] and not (spawn_guard["lock_while_waiting"] and spawn_guard["waiting"]) then
-            local new_target = get_target_list_target(last_target_list_target)
+        -- Cycle the player list targets. The current one is held while it can
+        -- still be fought: the loop moves to the next name once it dies, once it
+        -- is knocked down (so it can be stomped), or once it respawns with a new
+        -- character. A current target that is not on the list, or was taken off
+        -- it, hands the slot to the list as well. The list wraps after the last
+        -- name, so it keeps looping.
+        --
+        -- The character a list target was selected on is only worth keeping while
+        -- that player is still on the list; dropped members are pruned here so a
+        -- long session does not hold their data tables alive.
+        for data in target_list_characters do
+            if not ragebot_targets[data] then
+                target_list_characters[data] = nil
+            end
+        end
+
+        local list_current_character = target and target_list_characters[target]
+
+        local list_target_gone = target == nil
+            or target[7]
+            or target[18]
+            or (list_current_character ~= nil and target[3] ~= list_current_character)
+            or not ragebot_targets[target]
+
+        if target_list_only and list_target_gone and flags["ragebot"] and not (spawn_guard["lock_while_waiting"] and spawn_guard["waiting"]) then
+            local new_target = get_target_list_target(ragebot_targets[target] and target or last_target_list_target)
 
             if new_target then
                 last_target_list_target = new_target
-                set_ragebot_target(new_target, "ragebot target set to "..new_target[2]["Name"])
-                target = ragebot_target
+                target_list_characters[new_target] = new_target[3]
+
+                if new_target == target then
+                    -- The same player back from a respawn: the solve belongs to
+                    -- the old body, so it is thrown away instead of leading the
+                    -- first shot at a corpse's old spot.
+                    ragebot_aim_position = nil
+                    target_last_position = nil
+                    target_velocity = vector3_zero
+                else
+                    set_ragebot_target(new_target, "ragebot target set to "..new_target[2]["Name"])
+                    target = ragebot_target
+                end
             end
         end
 
@@ -22394,28 +23061,29 @@ local backtrack_data = {}
             target_velocity = vector3_zero
         end
 
+        -- "target" follows the selected target itself, read live this frame: the
+        -- aim point is solved further down, so using it left the circle a frame
+        -- behind at best and on the cursor on the frame a target was just set.
+        -- The head is used rather than the solver's hitbox so the circle stays on
+        -- the body when the hitbox rolls a limb, and lines up with "view target".
+        local fov_follow_position = nil
+
+        if ragebot_target then
+            fov_follow_position = get_fov_target_anchor(ragebot_target) or ragebot_aim_position
+        end
+
         if fov_circle then
-            -- Read here rather than every frame: the circle's follow is the only
-            -- thing that uses it.
-            local mouse_position = get_mouse_location(user_input_service)
-            local old_position = fov_circle["Position"]
-            local goal_position = flags["ragebot_field_of_view_follow_target"] and ragebot_aim_position or nil
-            if goal_position then
-                local position, on_screen = world_to_viewport_point(camera, goal_position)
+            -- "full" FOV has no circle at all, so the radius check from
+            -- update_field_of_view is kept and the follow adds the on-screen
+            -- check on top of it: a circle whose anchor left the viewport is
+            -- hidden instead of being pinned to the border.
+            local on_screen = update_fov_circle_follow(fov_circle, fov_circle_outline, nil, "ragebot_field_of_view_follow", "ragebot_field_of_view_lerp", fov_follow_position, dt)
+            local visible = on_screen and type(ragebot_field_of_view) == "number"
 
-                if on_screen then
-                    goal_position = vector2_new(position["X"], position["Y"])
-                else
-                    goal_position = nil
-                end
-            end
-
-            local alpha = 1 - math.exp(-16 * dt)
-            local new_position = old_position + ((goal_position or mouse_position) - old_position) * math.clamp(alpha, 0, 1)
-            fov_circle["Position"] = new_position
+            fov_circle["Visible"] = visible
 
             if fov_circle_outline then
-                fov_circle_outline["Position"] = new_position
+                fov_circle_outline["Visible"] = visible
             end
         end
 
@@ -22466,8 +23134,18 @@ local backtrack_data = {}
                     local torso_position = torso["Position"]
 
                     if target_last_position then
+                        local delta = clock() - last_refresh
                         local distance = (torso_position - target_last_position)
-                        target_velocity = distance / (clock() - last_refresh)
+
+                        -- A respawn, a teleport or a fling is a jump, not a
+                        -- velocity the shot can lead: one frame of it aims metres
+                        -- off the body. No lead is taken from it; the next samples
+                        -- settle on wherever the target actually is.
+                        if delta > 0.001 and distance["Magnitude"] / delta < 250 then
+                            target_velocity = distance / delta
+                        else
+                            target_velocity = vector3_zero
+                        end
                     end
 
                     target_last_position = torso_position
@@ -22533,7 +23211,7 @@ local backtrack_data = {}
                     end
                 end
             
-                local local_server_position = local_server_position["p"]
+                local server_position = local_server_position["p"]
 
                 -- The frame is read for this flag after the aim block closes, so
                 -- this resets the frame's own value; a second one standing up here
@@ -22582,9 +23260,12 @@ local backtrack_data = {}
             
                 ragebot_aim_position = ragebot_force_position or ragebot_aim_position
 
+                local did_custom_aim = false
+
                 if custom_ragebot_aim_position then
                     ragebot_aim_position = custom_ragebot_aim_position
                     custom_ragebot_aim_position = nil
+                    did_custom_aim = true
                 end
 
                 -- Solved once for the frame, and only for a real aim point: the
@@ -22594,7 +23275,7 @@ local backtrack_data = {}
                 ragebot_manipulation = nil
 
                 if flags["ragebot_manipulation"] and ragebot_aim_position and hitbox then
-                    ragebot_manipulation = manipulation["solve"](target, hitbox, ragebot_aim_position, local_server_position)
+                    ragebot_manipulation = manipulation["solve"](target, hitbox, ragebot_aim_position, server_position)
                 end
 
                 ragebot_aim_velocity = target_velocity
@@ -22603,10 +23284,20 @@ local backtrack_data = {}
                 -- No distance gate. The trigger is pulled at any range; the shot
                 -- is what reaches or does not, and the manipulation can move the
                 -- origin onto the target from anywhere.
-                if local_gun and (((not local_reloading or auto_fire_always_fire) and not target[18] and not target[7] and not spawn_guard["check"](target) and not grabbing_constraint) and (flags["auto_fire"] and (auto_fire_always_fire or (((local_server_position-ragebot_aim_position)["Magnitude"] > 0) or flags["follow_target"] or did_defensive)) and old_time-last_fire > fire_cooldown)) then
+                if local_gun and (((not local_reloading or auto_fire_always_fire) and not target[18] and not target[7] and not spawn_guard["check"](target) and not grabbing_constraint) and (flags["auto_fire"] and (auto_fire_always_fire or (((server_position-ragebot_aim_position)["Magnitude"] > 0) or flags["follow_target"] or did_defensive)) and old_time-last_fire > fire_cooldown)) then
                     local delay = flags["shot_delay"]
                     if delay > 0 then
                         wait(delay/1000)
+
+                        -- The delay yields frames. A plain shot is solved again
+                        -- from where the limb is now, with the muzzle read after
+                        -- the wait; the point solved before it describes a frame
+                        -- the target has already left. A backtrack, defensive,
+                        -- forced or manipulated point is a deliberate other frame
+                        -- and keeps what was solved.
+                        if not did_defensive and not flags["auto_fire_at_backtrack"] and not ragebot_manipulation and not ragebot_force_position and not did_custom_aim and ragebot_aim_position and target_velocity and hitbox and hitbox["Parent"] then
+                            ragebot_aim_position = hitbox["Position"] + target_velocity * (prediction == 0 and local_ping/500 or prediction == 2 and 0 or prediction)
+                        end
                     end
 
                     if local_gun then
@@ -22627,15 +23318,43 @@ local backtrack_data = {}
                         end
 
                         local pos = ragebot_aim_position
-                        local origin = local_server_position
                         local fire_hitbox = hitbox
+
+                        -- The part is read from the frame that solved the shot. If
+                        -- it is gone by the time the packet leaves (a respawn, a
+                        -- removed limb), the report names an instance the server
+                        -- cannot match, so the live part for the same hitbox is
+                        -- taken instead.
+                        if not fire_hitbox or not fire_hitbox["Parent"] then
+                            local live_parts = target[4]
+
+                            if live_parts then
+                                fire_hitbox = live_parts[resolve_ragebot_hitbox_part(live_parts)] or live_parts["HumanoidRootPart"]
+                            end
+                        end
+
+                        -- The packet leaves from the muzzle, the same origin the
+                        -- namecall hook, the automatic gun and the triggerbot send.
+                        -- A shot reported from the root starts the server's ray
+                        -- inside the floor or behind the character's own arm, which
+                        -- is a miss no matter where the aim point is. The position
+                        -- is read here, after any shot delay, not from the frame
+                        -- that pulled the trigger.
+                        local origin = local_server_position["p"] + vector3_new(0.004, 3.0208, -0.048)
 
                         if ragebot_manipulation then
                             pos = ragebot_manipulation["position"]
                             origin = ragebot_manipulation["origin"] or origin
-                            fire_hitbox = ragebot_manipulation["part"]
+                            fire_hitbox = ragebot_manipulation["part"] or fire_hitbox
                         end
 
+                        -- Only the way the packet leaves differs between the two
+                        -- modes. Hook mode resolves nothing here: it already has
+                        -- the solved shot and sends it through the event method
+                        -- itself, so no tool cooldown or activation gate sits
+                        -- between the shot and the server. Both modes pull the
+                        -- trigger on the same fire cooldown and with the same
+                        -- always-fire behaviour.
                         for i = 1, #new_local_guns do
                             local entry = new_local_guns[i]
                             local handle = entry[1]
@@ -22643,10 +23362,24 @@ local backtrack_data = {}
 
                             -- An unread ammo value is unknown, not empty: fire and
                             -- let the server reject the shot if the clip is dry.
-                            if (ammo == nil or ammo > 0) and handle and handle["Parent"] and not spawn_guard["check"](target) then
+                            if (ammo == nil or ammo > 0) and handle and handle["Parent"] and fire_hitbox and not target[7] and not spawn_guard["check"](target) then
                                 last_fire = clock()
 
-                                if shoot and not flags["auto_fire_dont_render"] then
+                                -- The shot's visibility is decided once here, before
+                                -- either mode sends it, so the beam, the tracer and
+                                -- the replicated bullet ray all read one answer.
+                                ragebot_silent_shot_time = flags["auto_fire_dont_render"] and clock() or 0
+
+                                local dir = (pos-origin)
+                                local Magnitude = dir["Magnitude"]
+
+                                -- Hook mode's packet is not rewritten by the hook,
+                                -- so the surface normal is worked out here: from
+                                -- the hit point back to the muzzle, the same one
+                                -- the hook would have written.
+                                local normal = (Magnitude <= 0 or Magnitude ~= Magnitude) and ((handle["Position"])-pos)["Unit"] or ((origin-pos)["Unit"])
+
+                                if shoot and not ragebot_shot_hidden() then
                                     setthreadidentity(8)
                                     pcall(function()
                                         local env = getfenv(shoot)
@@ -22664,13 +23397,27 @@ local backtrack_data = {}
                                     setthreadidentity(4)
                                 end
 
-                                local dir = (pos-origin)
-                                local Magnitude = dir["Magnitude"]
-                                
-                                for i = 1, ragebot_force_position and 2 or 1 do
+                                local sent = false
+                                local shots = ragebot_force_position and 2 or 1
+
+                                if auto_fire_mode == "hook" and hook_shoot then
                                     ragebot_firing_shot = true
-                                    event:FireServer("ShootGun", handle, origin, pos, fire_hitbox, (Magnitude <= 0 or Magnitude ~= Magnitude) and ((handle["Position"])-pos)["Unit"] or dir)
+
+                                    for i = 1, shots do
+                                        sent = pcall(hook_shoot, handle, origin, pos, fire_hitbox, normal)
+                                    end
+
                                     ragebot_firing_shot = false
+                                end
+
+                                -- No hooked sender (or it errored): send it the
+                                -- remote way rather than leave auto fire silent.
+                                if not sent then
+                                    for i = 1, shots do
+                                        ragebot_firing_shot = true
+                                        event:FireServer("ShootGun", handle, origin, pos, fire_hitbox, normal)
+                                        ragebot_firing_shot = false
+                                    end
                                 end
 
                                 spawn(get_bullet_result, target[2], fire_hitbox, origin, pos, target_velocity, did_defensive)
@@ -22791,6 +23538,10 @@ local backtrack_data = {}
 
     create_connection(menu_references["auto_fire_always_fire"]["on_toggle_change"], function(value)
         auto_fire_always_fire = value
+    end)
+
+    create_connection(menu_references["auto_fire_mode"]["on_dropdown_change"], function(value)
+        auto_fire_mode = (value and value[1]) or "remote"
     end)
 
     do
@@ -24747,21 +25498,20 @@ local backtrack_data = {}
         local do_void_hide = LPH_JIT_MAX(function(dt, hrp)
             local humanoid = local_parts["Humanoid"]
 
-            -- "force when" holds void hide off while one of its conditions is
-            -- on. Those are the moments the character has to stay where it is:
-            -- the teleport breaks a reload, and nothing is bought from out in
-            -- the void.
-            --
-            -- "stop if forced" is the way back to the old reading of the same
-            -- pick: ticked, void hide runs on through the moment it was told to
-            -- hold off in. A purchase is not part of that - it stands off on its
-            -- own below, whether this is ticked or not.
-            local held = not flags["void_hide_stop_if_forced"] and ((void_hide_force_when_reloading and local_reloading) or (void_hide_force_when_tabbed_out and not isrbxactive()) or (void_hide_force_when_not_full_health and (humanoid and humanoid["Health"] ~= humanoid["MaxHealth"] or false)))
+            -- "force when" overrides "disable when": a reload, a tabbed-out
+            -- window or a health drop is exactly when the character is easiest to
+            -- hit, so void hide keeps running through those instead of standing
+            -- off. "stop if forced" keeps the old reading of the pick for the
+            -- exploit mode, where void hide stops on the moment it is forced.
+            local forced = (void_hide_force_when_reloading and local_reloading) or (void_hide_force_when_tabbed_out and not isrbxactive()) or (void_hide_force_when_not_full_health and (humanoid and humanoid["Health"] ~= humanoid["MaxHealth"] or false))
 
             -- A purchase owns the character until it lands - the shop has to be
-            -- reached on foot - so the void stands off for it. The rest of the
-            -- line is the "disable when" picks, which hold it off too.
-            if held or purchasing or (void_hide_disable_when_target_selected and ragebot_target) or (void_hide_disable_when_target_knocked and (flags["ragebot"] and ragebot_target and ragebot_target[18])) or (void_hide_disable_when_following_target and local_following) then
+            -- reached on foot - so the void stands off for it no matter what is
+            -- forced. The rest of the line is the "disable when" picks, which a
+            -- forced condition overrides.
+            local disabled = (void_hide_disable_when_target_selected and ragebot_target) or (void_hide_disable_when_target_knocked and (flags["ragebot"] and ragebot_target and ragebot_target[18])) or (void_hide_disable_when_following_target and local_following)
+
+            if purchasing or (forced and flags["void_hide_stop_if_forced"]) or (disabled and not forced) then
                 -- This frame is not in the void, and a stale "in the void" is
                 -- read by the panel and by the stomp.
                 in_void = false
@@ -25791,6 +26541,8 @@ local get_backtrack_models = nil
         menu_references["aim_assist_field_of_view_show_fov"] = menu_references["aim_assist_field_of_view_settings"]:create_element({["name"] = "show fov"}, {["toggle"] = {["flag"] = "aim_assist_field_of_view_show_fov"}, ["colorpicker"] = {["color_flag"] = "aim_assist_field_of_view_color", ["default_color"] = color3_fromrgb(181, 255, 246), ["default_transparency"] = 0.8, ["transparency_flag"] = "aim_assist_field_of_view_transparency"}})
         menu_references["aim_assist_field_of_view_dead_zone"] = menu_references["aim_assist_field_of_view_settings"]:create_element({["name"] = "dead zone"}, {["colorpicker"] = {["color_flag"] = "aim_assist_field_of_view_dead_zone_color", ["default_color"] = color3_fromrgb(155, 0, 0), ["default_transparency"] = 0.8, ["transparency_flag"] = "aim_assist_field_of_view_dead_zone_transparency"}})
         menu_references["aim_assist_field_of_view_outline"] = menu_references["aim_assist_field_of_view_settings"]:create_element({["name"] = "outline"}, {["colorpicker"] = {["color_flag"] = "aim_assist_field_of_view_outline_color", ["default_color"] = color3_fromrgb(181, 255, 246), ["default_transparency"] = 0.4, ["transparency_flag"] = "aim_assist_field_of_view_outline_transparency"}})
+        menu_references["aim_assist_field_of_view_follow"] = menu_references["aim_assist_field_of_view_settings"]:create_element({["name"] = "follow"}, {["dropdown"] = {["flag"] = "aim_assist_field_of_view_follow", ["options"] = {"mouse", "target"}, ["default"] = {"mouse"}, ["requires_one"] = true}})
+        menu_references["aim_assist_field_of_view_lerp"] = menu_references["aim_assist_field_of_view_settings"]:create_element({["name"] = "lerp"}, {["slider"] = {["flag"] = "aim_assist_field_of_view_lerp", ["min"] = 1, ["max"] = 100, ["suffix"] = "%", ["default"] = 27, ["max_text"] = "instant"}})
 
     menu_references["silent_aim_section"] = menu["groups"]["main"]:create_section("legitbot", "redirection", 1, 0.23, 0.77)
         menu_references["silent_aim"] = menu_references["silent_aim_section"]:create_element({["name"] = "silent aim"}, {["toggle"] = {["flag"] = "silent_aim"}})
@@ -25803,6 +26555,8 @@ local get_backtrack_models = nil
         menu_references["silent_aim_field_of_view_settings"] = menu_references["silent_aim_field_of_view"]:create_settings()
         menu_references["silent_aim_field_of_view_show_fov"] = menu_references["silent_aim_field_of_view_settings"]:create_element({["name"] = "show fov"}, {["toggle"] = {["flag"] = "silent_aim_field_of_view_show_fov"}, ["colorpicker"] = {["color_flag"] = "silent_aim_field_of_view_color", ["default_color"] = color3_fromrgb(181, 255, 246), ["default_transparency"] = 0.8, ["transparency_flag"] = "silent_aim_field_of_view_transparency"}})
         menu_references["silent_aim_field_of_view_outline"] = menu_references["silent_aim_field_of_view_settings"]:create_element({["name"] = "outline"}, {["colorpicker"] = {["color_flag"] = "silent_aim_field_of_view_outline_color", ["default_color"] = color3_fromrgb(181, 255, 246), ["default_transparency"] = 0.4, ["transparency_flag"] = "silent_aim_field_of_view_outline_transparency"}})
+        menu_references["silent_aim_field_of_view_follow"] = menu_references["silent_aim_field_of_view_settings"]:create_element({["name"] = "follow"}, {["dropdown"] = {["flag"] = "silent_aim_field_of_view_follow", ["options"] = {"mouse", "target"}, ["default"] = {"mouse"}, ["requires_one"] = true}})
+        menu_references["silent_aim_field_of_view_lerp"] = menu_references["silent_aim_field_of_view_settings"]:create_element({["name"] = "lerp"}, {["slider"] = {["flag"] = "silent_aim_field_of_view_lerp", ["min"] = 1, ["max"] = 100, ["suffix"] = "%", ["default"] = 27, ["max_text"] = "instant"}})
         menu_references["silent_aim_max_curve"] = menu_references["silent_aim_section"]:create_element({["name"] = "max curve"}, {["slider"] = {["flag"] = "silent_aim_max_curve", ["min"] = 1, ["max"] = 100, ["default"] = 100, ["suffix"] = "%"}})
         menu_references["silent_aim_max_curve_settings"] = menu_references["silent_aim_max_curve"]:create_settings()
         menu_references["silent_aim_dont_curve_vertically"] = menu_references["silent_aim_max_curve_settings"]:create_element({["name"] = "dont curve vertically"}, {["toggle"] = {["flag"] = "silent_aim_dont_curve_vertically"}})
@@ -26139,15 +26893,11 @@ local get_backtrack_models = nil
 
     local do_aim_assist = LPH_JIT_MAX(function(dt, local_hrp)
         local mouse_position = get_mouse_location(user_input_service)
-
-        if fov_circle then
-            local old_position = fov_circle["Position"]
-            local new_position = old_position + (mouse_position - old_position) * dt*4^2
-
-            fov_circle["Position"] = new_position
-            fov_circle_outline["Position"] = new_position
-            fov_circle_dead_zone["Position"] = new_position
-        end
+        -- Set while this feature has a target. A nil falls through to the shared
+        -- anchor, which follows the locked ragebot target's head before the
+        -- cursor, so the ring does not snap back to the mouse while the target
+        -- sits just outside the aim-assist fov.
+        local aim_assist_follow_position = nil
 
         if dt ~= last_target_dt and flags["aim_assist"] then
             get_legitbot_target(dt)
@@ -26171,6 +26921,11 @@ local get_backtrack_models = nil
                             part_cframe*=vector3_new(clamp(cf.X, -size.X, size.X),clamp(cf.Y, -size.Y, size.Y),clamp(cf.Z, -size.Z, size.Z))
                             part_position = vector3_new(part_cframe.X, part_cframe.Y, part_cframe.Z)
                         end
+
+                        -- The circle marks the target, not the limb the aim was
+                        -- placed on: the part is walked to the head so the ring
+                        -- does not jump whenever the aim solver changes part.
+                        aim_assist_follow_position = get_fov_target_anchor(data) or part_position
 
                         local pos, _ = world_to_viewport_point(camera, part_position)
                         local move_position = vector2_new(pos["X"] - mouse_position["X"], pos["Y"] - mouse_position["Y"])
@@ -26209,6 +26964,22 @@ local get_backtrack_models = nil
                         end
                     end
                 end
+            end
+        end
+
+        if fov_circle then
+            -- Hidden while the followed point is outside the viewport; the
+            -- feature's own toggle keeps owning the transparency fade.
+            local visible = update_fov_circle_follow(fov_circle, fov_circle_outline, fov_circle_dead_zone, "aim_assist_field_of_view_follow", "aim_assist_field_of_view_lerp", aim_assist_follow_position, dt)
+
+            fov_circle["Visible"] = visible
+
+            if fov_circle_outline then
+                fov_circle_outline["Visible"] = visible
+            end
+
+            if fov_circle_dead_zone then
+                fov_circle_dead_zone["Visible"] = visible
             end
         end
 
@@ -26465,14 +27236,11 @@ local get_backtrack_models = nil
 
     local do_silent_aim = LPH_JIT_MAX(function(dt, hrp)
         local mouse_position = get_mouse_location(user_input_service)
-
-        if fov_circle then
-            local old_position = fov_circle["Position"]
-            local new_position = old_position + (mouse_position - old_position) * dt*4^2
-
-            fov_circle["Position"] = new_position
-            fov_circle_outline["Position"] = new_position
-        end
+        -- Only set on a frame that actually resolves an aim point; otherwise the
+        -- shared anchor follows the locked ragebot target's head, and the cursor
+        -- comes last, so a stale target never pins the circle in place.
+        local silent_aim_follow_position = nil
+        local did_silent_aim = false
 
         if dt ~= last_target_dt and flags["silent_aim"] then
             get_legitbot_target(dt)
@@ -26497,6 +27265,9 @@ local get_backtrack_models = nil
 
                     silent_aim_position = part_position
                     custom_silent_aim_position = nil
+                    -- Follow the body, not the solved limb, so the circle sits on
+                    -- the target instead of drifting to whichever part was aimed.
+                    silent_aim_follow_position = get_fov_target_anchor(data) or part_position
 
                     if silent_aim_max_curve or silent_aim_dont_curve_vertically then
                         local pos = world_to_viewport_point(camera, silent_aim_position)
@@ -26505,13 +27276,27 @@ local get_backtrack_models = nil
                         silent_aim_position = ray["Origin"] + ray["Direction"] * (ray["Origin"]-part_position)["magnitude"]
                     end
 
-                    return
+                    did_silent_aim = true
                 end
             end
         end
 
-        silent_aim_position = nil
-        custom_silent_aim_position = nil
+        if not did_silent_aim then
+            silent_aim_position = nil
+            custom_silent_aim_position = nil
+        end
+
+        if fov_circle then
+            -- Hidden while the followed point is outside the viewport; the
+            -- feature's own toggle keeps owning the transparency fade.
+            local visible = update_fov_circle_follow(fov_circle, fov_circle_outline, nil, "silent_aim_field_of_view_follow", "silent_aim_field_of_view_lerp", silent_aim_follow_position, dt)
+
+            fov_circle["Visible"] = visible
+
+            if fov_circle_outline then
+                fov_circle_outline["Visible"] = visible
+            end
+        end
     end)
 
     local update_silent_aim_field_of_view = function()
@@ -27196,6 +27981,10 @@ local get_backtrack_models = nil
             end
 
             if value then
+                -- Backtrack models are drawn with the same neon / forcefield
+                -- material, so they need the same floor as the body material.
+                raise_render_quality()
+
                 create_backtrack_data()
                 heartbeat[#heartbeat+1] = do_backtrack
 
