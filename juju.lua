@@ -123,6 +123,7 @@ local delay = task["delay"]
 local spawn = task["spawn"]
 local clamp = math["clamp"]
 local floor = math["floor"]
+local sqrt = math["sqrt"]
 local shops = {}
 local wait = task["wait"]
 local type = type
@@ -272,6 +273,13 @@ local active_tweens = {
 local tween = nil 
 do
     local sqrt = math["sqrt"]
+
+    -- One closure per easing style for the whole session. These used to be
+    -- rebuilt inside every tween call, and a target change starts a tween on
+    -- every ESP drawing it recolours.
+    local ease_exponential = function(t) return t == 1 and 1 or 1 - 2 ^ (-10 * t) end
+    local ease_quad = function(t) return t * t end
+    local ease_circular = function(t) return sqrt(1 - (t - 1) ^ 2) end
  
     tween = LPH_NO_VIRTUALIZE(function(object, properties, easing_style, _, tween_duration)
         local start_time = clock()
@@ -283,11 +291,11 @@ do
         local ease
 
         if easing_style == exponential then
-            ease = function(t) return t == 1 and 1 or 1 - 2 ^ (-10 * t) end
+            ease = ease_exponential
         elseif easing_style == quad then
-            ease = function(t) return t * t end
+            ease = ease_quad
         else
-            ease = function(t) return sqrt(1 - (t - 1) ^ 2) end
+            ease = ease_circular
         end
 
         local is_sine = easing_style == "sine"
@@ -8476,6 +8484,10 @@ local legitbot_target = nil
 local ragebot_target = nil
 local custom_ragebot_aim_position = nil
 local ragebot_aim_position = nil
+-- The limb `ragebot_aim_position` was solved on. The player's own shot is
+-- rewritten to land on it when a target is selected, so the packet and the
+-- solved point name the same body part.
+local ragebot_aim_part = nil
 -- The solved shot for the locked target: origin above and in front of the
 -- character, hit position on the best visible limb. nil means the plain shot.
 local ragebot_manipulation = nil
@@ -8486,6 +8498,59 @@ local ragebot_firing_shot = false
 -- the last shot sent with the toggle on, so the ray that arrives a round trip
 -- later is attributed to the shot that made it.
 local ragebot_silent_shot_time = 0
+
+-- Whether follow target keeps moving on a knocked target. Its own "stop if"
+-- list owns the answer; void hide reads it so "disable when following target"
+-- stands down for exactly the targets the follow loop will actually follow.
+local follow_target_follows_knocked = false
+
+-- The guns auto equip keeps in the character's hands, in the order the menu
+-- lists them. Auto fire reads the same table, so the guns it fires are exactly
+-- the ones auto equip equipped and in that order, instead of whatever order the
+-- binding map happens to hand back.
+local auto_equip_gun_names = {"[Rifle]"}
+local auto_equip_gun_set = {["[Rifle]"] = true}
+local auto_equip_gun_name_of = {
+    ["double-barrel sg"] = "[Double-Barrel SG]",
+    ["flintlock"] = "[Flintlock]",
+    ["revolver"] = "[Revolver]",
+    ["rifle"] = "[Rifle]",
+    ["ak47"] = "[AK47]",
+    ["p90"] = "[P90]",
+    ["lmg"] = "[LMG]",
+    ["aug"] = "[AUG]"
+}
+
+local function refresh_auto_equip_gun_names()
+    local value = flags["auto_equip_gun"]
+
+    if type(value) ~= "table" then
+        return
+    end
+
+    local names = {}
+
+    for i = 1, #value do
+        local name = auto_equip_gun_name_of[value[i]]
+
+        if name then
+            names[#names+1] = name
+        end
+    end
+
+    -- An empty pick means the dropdown has not been written yet; the current
+    -- list is kept rather than disarming auto equip mid-load.
+    if #names > 0 then
+        local set = {}
+
+        for i = 1, #names do
+            set[names[i]] = true
+        end
+
+        auto_equip_gun_names = names
+        auto_equip_gun_set = set
+    end
+end
 
 -- Infinite distance needs no state of its own: the flag decides whether the
 -- origin is spoofed beside the body or taken from the solver.
@@ -9279,7 +9344,7 @@ do
     -- to this one. That replaces the old shared pair of "last seen" variables,
     -- which one call would overwrite while another was still waiting, leaving
     -- whichever shot lost the race with no marker at all.
-    get_bullet_result = LPH_JIT_MAX(function(player, part, old_server_position, aim_position, target_velocity, did_defensive)
+    get_bullet_result = LPH_JIT_MAX(function(player, part, old_server_position, aim_position, target_velocity, did_defensive, aim_part)
         setthreadidentity(8)
 
         local data = player_data[player]
@@ -9305,8 +9370,14 @@ do
         -- drop the report from the damage number on exactly those hits.
         local message = nil
 
-        if old_server_position and part and aim_position and part["Parent"] then
-            message = " (pred miss: "..tostring(round((aim_position-part["Position"])["Magnitude"], 1))..") (velocity: "..tostring(round((target_velocity or vector3_zero)["Magnitude"], 1))..(did_defensive and ") (defensive: true)" or ") (defensive: false)")
+        -- The aim point sits on the limb that was aimed at, which is not always
+        -- the limb the packet names: another limb of the target can cross the
+        -- line. The miss is measured on the aimed limb, or the distance between
+        -- two different limbs would be reported as a prediction error.
+        local miss_part = aim_part or part
+
+        if old_server_position and part and aim_position and miss_part and miss_part["Parent"] then
+            message = " (pred miss: "..tostring(round((aim_position-miss_part["Position"])["Magnitude"], 1))..") (velocity: "..tostring(round((target_velocity or vector3_zero)["Magnitude"], 1))..(did_defensive and ") (defensive: true)" or ") (defensive: false)")
         end
 
         repeat
@@ -9525,7 +9596,16 @@ do
             return
         end
 
-        return local_server_position["p"] + vector3_new(0.004, 3.0208, -0.048), ragebot_aim_position, ragebot_aim_velocity, ragebot_aim_defensive
+        -- The report describes the packet that was sent. A manipulated shot carries
+        -- the wall's anchored origin and that solve's point, so the missing-hit
+        -- readout measures the shot the server was told about, not the muzzle.
+        local manip = ragebot_manipulation
+
+        if manip and manip["target"] == data and manip["position"] and manip["part"] == part and manip["origin"] then
+            return manip["origin"], manip["position"], ragebot_aim_velocity, ragebot_aim_defensive, manip["aim_part"] or part
+        end
+
+        return local_server_position["p"] + vector3_new(0.004, 3.0208, -0.048), ragebot_aim_position, ragebot_aim_velocity, ragebot_aim_defensive, ragebot_aim_part or part
     end)
 
     local shoot_shape_reported = false
@@ -9622,6 +9702,68 @@ do
                         return old_namecall(self, unpack(args, 1, shoot_arg_count < 6 and 6 or shoot_arg_count))
                     end
 
+                    -- A selected ragebot target owns the player's own shot: the
+                    -- packet is rewritten to the solved point and the limb it was
+                    -- solved on, so a click lands on that target even when the game
+                    -- aimed its own ray somewhere else. This is the silent aim
+                    -- redirect, sourced from the ragebot point instead of the
+                    -- cursor.
+                    --
+                    -- A manipulated solve carries its own point and origin. When the
+                    -- target is in the open the solve has no origin and the game's
+                    -- own one is kept; when a wall blocks the line it is the wall's
+                    -- anchored point, so a manual click goes through the wall with
+                    -- the same packet auto fire sends.
+                    local shot_rewritten = false
+
+                    if ragebot_target and ragebot_aim_position and not ragebot_target[7] and not ragebot_target[18] then
+                        local manip = ragebot_manipulation
+                        local target_part = nil
+                        local aim_point = ragebot_aim_position
+                        local manip_origin = nil
+
+                        if manip and manip["target"] == ragebot_target and manip["position"] and manip["part"] and manip["part"]["Parent"] then
+                            target_part = manip["part"]
+                            aim_point = manip["position"]
+                            manip_origin = manip["origin"]
+                        end
+
+                        if not (target_part and target_part["Parent"]) then
+                            target_part = ragebot_aim_part
+                        end
+
+                        if not (target_part and target_part["Parent"]) then
+                            local target_parts = ragebot_target[4]
+                            target_part = target_parts["Head"] or target_parts["UpperTorso"] or target_parts["HumanoidRootPart"]
+                        end
+
+                        if target_part and target_part["Parent"] then
+                            local shot_origin = manip_origin or args[3]
+
+                            if typeof(shot_origin) ~= "Vector3" then
+                                shot_origin = local_server_position["p"] + vector3_new(0.004, 3.0208, -0.048)
+                            end
+
+                            -- Same small jitter the ragebot's own packet carries, so
+                            -- two shots are not the exact same point.
+                            local shot_position = aim_point + vector3_new(math_random(-3,3)/100, math_random(-3,3)/100, 0)
+                            local direction = (shot_origin - shot_position)["Unit"]
+                            local magnitude = direction["Magnitude"]
+
+                            args[3] = shot_origin
+                            args[4] = shot_position
+                            args[5] = target_part
+
+                            -- The sixth argument is the hit surface normal. Keep the
+                            -- game's own if the origin and the point coincide.
+                            if magnitude > 0 and magnitude == magnitude then
+                                args[6] = direction
+                            end
+
+                            shot_rewritten = true
+                        end
+                    end
+
                     local part = args[5]
 
                     if part then
@@ -9636,15 +9778,22 @@ do
                                 if parent["GetAttribute"](parent, "1") then
                                     part = player_data[player][4][part["Name"]]
                                     args[5] = part
-                                    local report_origin, report_aim, report_velocity, report_defensive = get_ragebot_report(player, part)
-                                    spawn(get_bullet_result, player, part, report_origin, report_aim, report_velocity, report_defensive)
+                                    local report_origin, report_aim, report_velocity, report_defensive, report_part = get_ragebot_report(player, part)
+                                    spawn(get_bullet_result, player, part, report_origin, report_aim, report_velocity, report_defensive, report_part)
                                     return old_namecall(self, unpack(args))
                                 end
 
-                                local report_origin, report_aim, report_velocity, report_defensive = get_ragebot_report(player, part)
-                                spawn(get_bullet_result, player, part, report_origin, report_aim, report_velocity, report_defensive)
+                                local report_origin, report_aim, report_velocity, report_defensive, report_part = get_ragebot_report(player, part)
+                                spawn(get_bullet_result, player, part, report_origin, report_aim, report_velocity, report_defensive, report_part)
                             end
                         end
+                    end
+
+                    -- The rewritten packet has to be the one that leaves. This
+                    -- branch only edits the argument table, and the untouched
+                    -- path at the bottom sends the original varargs.
+                    if shot_rewritten then
+                        return old_namecall(self, unpack(args, 1, shoot_arg_count < 6 and 6 or shoot_arg_count))
                     end
                 elseif packet == "UpdateCursorImage" and flags["unlock_custom_crosshair"] then
                     local value = select(2, ...)
@@ -13724,14 +13873,22 @@ end
             -- The first state that matches is the one shown. Waiting for a
             -- forcefield comes first, because it explains why the ragebot is
             -- holding fire. Then the states that move the character: stomping,
-            -- then reloading, which holds the shot the same way, then following.
-            -- Then the void, where no shot can land, then "manipulated": shown
-            -- only while a gun is held and the solved shot goes through a wall -
-            -- the origin was moved and the character itself has no line to the
-            -- hit point. A solved shot with nothing in the way, a target the
-            -- solver could not reach, and a shot with no gun to fire it all show
-            -- nothing. Buying and an active forcefield follow, "unsafe" last.
-            local state = (flags["ragebot"] and center_panel_waiting_protection) and "waiting forcefield" or stomping and "stomping" or local_reloading and "reloading" or flags["follow_target"] and ragebot_target and "following" or local_following and "following" or (in_void or in_void == nil) and "void" or flags["ragebot_manipulation"] and ragebot_manipulation and ragebot_manipulation["through_wall"] and local_gun and "manipulated" or purchasing and "purchasing" or local_parts["ForceField"] and "invulnerable" or "unsafe"
+            -- then reloading, which holds the shot the same way. The void comes
+            -- before "following": a character held out in the void is not being
+            -- followed, whatever the follow toggle and the target say, and the
+            -- panel used to claim otherwise. Once void hide stands down for the
+            -- follow target the character is back in the map, in_void is false,
+            -- and "following" is then the truth. The word comes from
+            -- local_following, which the follow loop sets only on a frame it
+            -- actually moved the character, so a knocked target or its own
+            -- stop-if list cannot make the panel lie either. Then "manipulated":
+            -- shown only while a gun is held and the solved shot goes through a
+            -- wall - the origin was moved and the character itself has no line
+            -- to the hit point. A solved shot with nothing in the way, a target
+            -- the solver could not reach, and a shot with no gun to fire it all
+            -- show nothing. Buying and an active forcefield follow, "unsafe"
+            -- last.
+            local state = (flags["ragebot"] and center_panel_waiting_protection) and "waiting forcefield" or stomping and "stomping" or local_reloading and "reloading" or (in_void or in_void == nil) and "void" or local_following and "following" or flags["ragebot_manipulation"] and ragebot_manipulation and ragebot_manipulation["through_wall"] and local_gun and "manipulated" or purchasing and "purchasing" or local_parts["ForceField"] and "invulnerable" or "unsafe"
             if state ~= center_panel_state then
                 center_panel_state = state
                 tween(text3, {["Transparency"] = 0.35}, linear, out, 0.09)
@@ -14771,6 +14928,7 @@ end
         end
 
         heartbeat[#heartbeat+1] = tween_function
+        heartbeat_inline[tween_function] = true
         delay(0.2, function()
             local found = nil
             for i = 1, #heartbeat do
@@ -14889,6 +15047,9 @@ end
         end
 
         heartbeat[#heartbeat+1] = new_function
+        -- Pure Drawing writes, no wait() inside: the frame thread can run it
+        -- instead of a new coroutine per tracer per frame.
+        heartbeat_inline[new_function] = true
         destroy(object)
         wait(lifetime + 0.3)
         for i = 1, #heartbeat do
@@ -16011,6 +16172,9 @@ end
             end
 
             heartbeat[#heartbeat+1] = new_function
+        -- Pure Drawing writes, no wait() inside: the frame thread can run it
+        -- instead of a new coroutine per tracer per frame.
+        heartbeat_inline[new_function] = true
 
             delay(lifetime + new_half, function()
                 for i = 1, #heartbeat do
@@ -16134,6 +16298,9 @@ end
             end
 
             heartbeat[#heartbeat+1] = new_function
+        -- Pure Drawing writes, no wait() inside: the frame thread can run it
+        -- instead of a new coroutine per tracer per frame.
+        heartbeat_inline[new_function] = true
 
             delay(lifetime + 0.3, function()
                 for i = 1, #heartbeat do
@@ -16249,6 +16416,9 @@ end
             end
 
             heartbeat[#heartbeat+1] = new_function
+        -- Pure Drawing writes, no wait() inside: the frame thread can run it
+        -- instead of a new coroutine per tracer per frame.
+        heartbeat_inline[new_function] = true
 
             delay(lifetime + 0.2, function()
                 for i = 1, #heartbeat do
@@ -16337,6 +16507,7 @@ end
             end
 
             heartbeat[#heartbeat+1] = tween_function
+            heartbeat_inline[tween_function] = true
             delay(0.25, function()
                 for i = 1, #heartbeat do
                     if heartbeat[i] == tween_function then
@@ -16391,6 +16562,7 @@ end
             end
 
             heartbeat[#heartbeat+1] = tween_function
+            heartbeat_inline[tween_function] = true
             delay(0.25, function()
                 for i = 1, #heartbeat do
                     if heartbeat[i] == tween_function then
@@ -17916,10 +18088,22 @@ end
                 -- all match the last frame there is nothing new to send.
                 local cache = data[20]
                 local has_tool = data[13] ~= nil
-                -- The health text hugs the bar, so its width moves it. It is
-                -- written by the health signal, not here, and would otherwise go
-                -- stale on a hit while the cache still matches.
-                local text_w = do_health_text and floor(drawings[7]["TextBounds"]["X"]) or 0
+                -- The health text hugs the bar, so its width moves it. The width
+                -- is a layout read and used to run for every visible player every
+                -- frame; it only changes when the string (or the font) does, so
+                -- it is cached against the text and refreshed on a change.
+                local text_w = 0
+
+                if do_health_text then
+                    local health_text_drawing = drawings[7]
+
+                    if data[30] ~= health_text_drawing["Text"] then
+                        data[30] = health_text_drawing["Text"]
+                        data[31] = floor(health_text_drawing["TextBounds"]["X"])
+                    end
+
+                    text_w = data[31] or 0
+                end
                 local pixel_x = floor(box_x)
                 local pixel_y = floor(box_y)
                 local pixel_width = floor(x_size)
@@ -18047,7 +18231,29 @@ end
         end
     end) 
 
+    -- One fade per player. A respawn or a target change could start a second
+    -- fade while the first was still writing transparencies, and every live fade
+    -- is a heartbeat closure running for 0.75 seconds. Starting a fade retires
+    -- the previous one for that player.
+    local esp_fades = setmetatable({}, {["__mode"] = "k"})
+
     local tween_esp = LPH_NO_VIRTUALIZE(function(data, showing)
+        local old_fade = esp_fades[data]
+
+        if old_fade then
+            old_fade[1] = false
+
+            for i = 1, #heartbeat do
+                if heartbeat[i] == old_fade[2] then
+                    remove(heartbeat, i)
+                    break
+                end
+            end
+        end
+
+        local fade = {true, nil}
+        esp_fades[data] = fade
+
         local status = data[1]
 
         local drawings = data[5]
@@ -18086,6 +18292,12 @@ end
         local elapsed_time = 0
 
         local heartbeat_function = function(dt)
+            -- Retired by a newer fade for this player: stop without touching the
+            -- drawings the newer fade now owns.
+            if not fade[1] then
+                return
+            end
+
             elapsed_time+=dt
             local value = get_value(tween_service, elapsed_time / 0.75, quad, out)
 
@@ -18109,9 +18321,17 @@ end
             end
         end
 
+        fade[2] = heartbeat_function
         heartbeat[#heartbeat+1] = heartbeat_function
+        heartbeat_inline[heartbeat_function] = true
 
         delay(0.75, function()
+            if not fade[1] then
+                return
+            end
+
+            fade[1] = false
+
             local index = nil
             for i = 1, #heartbeat do
                 if heartbeat[i] == heartbeat_function then
@@ -18703,6 +18923,9 @@ end
         local health = data[9]
 
         data[20] = nil
+        -- A rebuilt text drawing has new bounds; the ESP width cache is stale.
+        data[30] = nil
+        data[31] = nil
 
         data[5][7] = create_esp_drawing("Text", {
             Color = colors[status][7],
@@ -19734,6 +19957,9 @@ end
 
                     if health_text then
                         health_text["Font"] = small_font
+                        -- Same string, new glyph metrics: the cached width is
+                        -- no longer the width this font draws.
+                        data[30] = nil
                     end
 
                     local tool_text = drawings[8]
@@ -21781,11 +22007,20 @@ local backtrack_data = {}
         menu_references["auto_fire_always_fire"] = menu_references["auto_fire_settings"]:create_element({["name"] = "always fire"}, {["toggle"] = {["flag"] = "auto_fire_always_fire", ["default"] = true}})
         menu_references["auto_fire_dont_render"] = menu_references["auto_fire_settings"]:create_element({["name"] = "dont render"}, {["toggle"] = {["flag"] = "auto_fire_dont_render", ["default"] = false}})
 
-        -- The manipulation describes the shot auto fire sends. It is fully
-        -- automatic: the hitbox is the best visible limb and the origin is
-        -- moved only as far as it must to clear a wall, so there is nothing
-        -- left to configure.
+        -- The manipulation describes the shot auto fire sends. The limb is the
+        -- heaviest one the shot's line reaches, the origin is moved only as far
+        -- as it must to clear a wall, and the packet names the part the moved
+        -- origin's ray actually touches.
+        --
+        -- "gun distance" is the plausibility check on that origin: a shot
+        -- reported from farther than this from the gun is one the server can
+        -- reject, so the solve never names one. The anchor steps over a wall
+        -- only while it stays inside the radius, and the fallback pattern is
+        -- scaled to it instead of to the shot. 0 is off, which restores the
+        -- old behaviour of moving the origin as far as the wall is.
         menu_references["ragebot_manipulation"] = menu_references["general_section"]:create_element({["name"] = "manipulation"}, {["toggle"] = {["flag"] = "ragebot_manipulation", ["default"] = false}})
+        menu_references["ragebot_manipulation_settings"] = menu_references["ragebot_manipulation"]:create_settings()
+        menu_references["ragebot_manipulation_distance"] = menu_references["ragebot_manipulation_settings"]:create_element({["name"] = "gun distance"}, {["slider"] = {["flag"] = "ragebot_manipulation_distance", ["min"] = 0, ["max"] = 40, ["suffix"] = " studs", ["default"] = 12, ["min_text"] = "off"}})
 
         menu_references["auto_equip"] = menu_references["general_section"]:create_element({["name"] = "auto equip"}, {["toggle"] = {["flag"] = "auto_equip", ["default"] = false}})
         menu_references["auto_equip_settings"] = menu_references["auto_equip"]:create_settings()
@@ -22079,7 +22314,9 @@ local backtrack_data = {}
     -- and, only when a wall hides every limb from the character's own muzzle,
     -- an origin it could not have fired from - up in the air and in front of
     -- the character. Both are handed to whoever is about to fire. The character
-    -- and the gun stay where they are.
+    -- and the gun stay where they are, and the origin never moves farther from
+    -- the gun than the gun-distance check allows, so the packet names a shot
+    -- the server can plausibly accept.
     --
     -- The work is bounded per call, because it runs on the frame that fires. A
     -- target in the open costs one ray. A hidden one is searched a few rays at a
@@ -22115,11 +22352,40 @@ local backtrack_data = {}
         ["budget"] = 16,
         -- Every origin the search can try, nearest first. Filled in once, below.
         ["pattern"] = {},
+        -- Gaps tried between the wall that blocks the sight line and the moved
+        -- origin, nearest the wall first. The first one clears a single wall;
+        -- the later ones step past a second layer, a window frame or a fence
+        -- post without the search having to sample them.
+        ["anchor_gaps"] = {0.6, 1.2, 2.4, 4, 7},
+        -- Limbs the wall anchor may try, heaviest first, and the rays it may
+        -- cast in one call. The anchor is one cast plus at most one check per
+        -- gap, so this is a hard ceiling, not a budget that has to be spent.
+        -- Six limbs reach past the head and torso to the arms: when a prop hides
+        -- the centre of the body from the wall-side point, an arm that clears it
+        -- is still a hit the packet can carry.
+        ["anchor_limbs"] = 6,
+        ["anchor_budget"] = 20,
+        -- The anchor ray ignores the world's bodies: the local character, the
+        -- target and workspace.Ignored. It is looking for what blocks the line,
+        -- and the limb the line ends on is not an obstruction.
+        ["anchor_params"] = RaycastParams["new"](),
+        ["anchor_ready"] = false,
+        ["anchor_character"] = nil,
+        ["anchor_target_character"] = nil,
+        ["anchor_ignored"] = nil,
+        -- An anchor pass that found nothing is not repeated every frame; the
+        -- geometry it reads does not change between two of them.
+        ["anchor_target"] = nil,
+        ["anchor_tick"] = 0,
         -- The moved origin in use: for which target, on which limb, from which
-        -- origin.
+        -- origin. "pattern" origins are rebuilt from the character's position
+        -- every time; "anchor" origins are a point in the world beside a wall
+        -- and stay where they were solved.
         ["hold_target"] = nil,
         ["hold_limb"] = 1,
         ["hold_origin"] = 1,
+        ["hold_kind"] = nil,
+        ["hold_anchor"] = nil,
         -- Where the search stopped when it ran out of budget, and when a search
         -- for a heavier limb than the held one may start again.
         ["sweep_target"] = nil,
@@ -22198,14 +22464,187 @@ local backtrack_data = {}
         -- anything, or only hits the target's own character. The character
         -- itself and workspace.Ignored are filtered out, so a roof or a wall is
         -- what rejects a point, which is the whole test.
-        manipulation["visible"] = LPH_NO_VIRTUALIZE(function(origin, point, character)
+        --
+        -- The trace returns what the ray reaches: true for clear air, the
+        -- instance when the target's own body is in the way, false when the world
+        -- blocks it. The instance matters: a shot aimed at the head with an arm
+        -- across it reaches the arm first, and a packet that names the head is
+        -- one the server's own ray can contradict.
+        manipulation["trace"] = LPH_NO_VIRTUALIZE(function(origin, point, character)
             local result = raycast(workspace, origin, point - origin, params)
 
             if not result then
-                return true
+                return true, nil
             end
 
-            return result["Instance"]:IsDescendantOf(character)
+            local instance = result["Instance"]
+
+            -- A ray that starts inside a part reports that part at zero
+            -- distance. It is not a sight line and the part is not an origin a
+            -- packet can carry: the shot would begin inside the world, or inside
+            -- the victim's own body. Both are rejected by the server, so the
+            -- point is treated the way a wall is.
+            if (result["Position"] - origin)["Magnitude"] <= 0.05 then
+                return false, instance
+            end
+
+            if instance:IsDescendantOf(character) then
+                return true, instance
+            end
+
+            return false, instance
+        end)
+
+        manipulation["visible"] = LPH_NO_VIRTUALIZE(function(origin, point, character)
+            local clear = manipulation["trace"](origin, point, character)
+
+            return clear
+        end)
+
+        -- The limb the packet names. It is the limb the solved ray actually
+        -- reaches, not the one that was aimed at, as long as that limb is one the
+        -- hub tracks for the target; a hat or a tool reached first is not a body
+        -- part the server pays out for, so the aimed limb is kept then.
+        manipulation["reported_part"] = LPH_NO_VIRTUALIZE(function(parts, aimed, reached)
+            if reached and reached ~= true and reached["Name"] then
+                local tracked = parts[reached["Name"]]
+
+                if tracked == reached then
+                    return tracked
+                end
+            end
+
+            return aimed
+        end)
+
+        local anchor_params = manipulation["anchor_params"]
+
+        -- The anchor ray is cast along a sight line that starts on a limb, so the
+        -- body at the end of it is filtered out with the local character: a shot
+        -- is not blocked by the body it hits, and the limb's own part sits over
+        -- the ray origin. What is left of the world is the obstruction.
+        manipulation["ensure_anchor_filter"] = LPH_NO_VIRTUALIZE(function(character)
+            local ignored = find_first_child(workspace, "Ignored")
+
+            if not manipulation["anchor_ready"] or manipulation["anchor_character"] ~= local_character or manipulation["anchor_target_character"] ~= character or manipulation["anchor_ignored"] ~= ignored then
+                local filter = {local_character, character}
+
+                if ignored then
+                    filter[#filter + 1] = ignored
+                end
+
+                anchor_params["FilterType"] = Enum["RaycastFilterType"]["Exclude"]
+                anchor_params["RespectCanCollide"] = true
+                anchor_params["FilterDescendantsInstances"] = filter
+
+                manipulation["anchor_ready"] = true
+                manipulation["anchor_character"] = local_character
+                manipulation["anchor_target_character"] = character
+                manipulation["anchor_ignored"] = ignored
+            end
+        end)
+
+        -- Where the world first blocks the line from a limb to the muzzle, the
+        -- shot is reported from just on the limb's side of that first wall. It is
+        -- the least the origin can move and still see the limb, it is found in one
+        -- ray, and unlike a point of the pattern it does not depend on how far the
+        -- target is: a wall a stud in front of the target is stepped over exactly,
+        -- where the pattern would have to sample that neighbourhood by chance.
+        --
+        -- The sight line is cast from the limb to the muzzle, so the first hit is
+        -- the near face of the first obstruction and every gap below it places the
+        -- origin before that face - on the limb's side. Each candidate is checked
+        -- with the same visibility ray the rest of the solve uses, because a gap
+        -- can still land inside a second layer or another part of the world.
+        manipulation["anchor"] = LPH_NO_VIRTUALIZE(function(target, aim_position, hitbox, muzzle, limit)
+            local character = target[3]
+            local parts = target[4]
+
+            if not character or not hitbox or not hitbox["Parent"] then
+                return nil
+            end
+
+            manipulation["ensure_anchor_filter"](character)
+
+            local hitboxes = manipulation["calculated_hitboxes"]
+            local gaps = manipulation["anchor_gaps"]
+            local trace = manipulation["trace"]
+            local reported_part = manipulation["reported_part"]
+            local hitbox_position = hitbox["Position"]
+            local budget = manipulation["anchor_budget"]
+            local limbs = #hitboxes
+
+            if limbs > manipulation["anchor_limbs"] then
+                limbs = manipulation["anchor_limbs"]
+            end
+
+            for limb = 1, limbs do
+                local part = parts[hitboxes[limb][1]]
+
+                if part then
+                    local point = aim_position + (part["Position"] - hitbox_position)
+                    local to_muzzle = muzzle - point
+                    local distance = to_muzzle["Magnitude"]
+
+                    if distance > 1 then
+                        if budget <= 0 then
+                            return nil
+                        end
+
+                        budget -= 1
+
+                        local result = raycast(workspace, point, to_muzzle, anchor_params)
+
+                        -- Nothing of the world in front of the limb: the muzzle
+                        -- sees it, which the solve has already tried.
+                        if result and not result["Instance"]:IsDescendantOf(character) then
+                            local unit = to_muzzle / distance
+                            local hit_position = result["Position"]
+                            local wall_distance = (hit_position - point)["Magnitude"]
+
+                            -- Every gap moves the candidate straight away from
+                            -- the muzzle, so the first gap is the nearest the
+                            -- origin can be to the gun. A limb whose nearest
+                            -- candidate is already outside the check has nothing
+                            -- the solve may send, and its later gaps are farther.
+                            local nearest = (hit_position - muzzle)["Magnitude"] + gaps[1]
+
+                            for index = 1, #gaps do
+                                local gap = gaps[index]
+
+                                -- The gap may not swallow the whole line: the
+                                -- origin has to stay a body's width away from the
+                                -- limb instead of ending up inside it.
+                                if gap + 1 < wall_distance and (not limit or nearest + gap - gaps[1] <= limit) then
+                                    if budget <= 0 then
+                                        return nil
+                                    end
+
+                                    budget -= 1
+
+                                    local candidate = hit_position - unit * gap
+                                    local clear, reached = trace(candidate, point, character)
+
+                                    if clear then
+                                        return {
+                                            ["origin"] = candidate,
+                                            ["position"] = point,
+                                            ["part"] = reported_part(parts, part, reached),
+                                            ["aim_part"] = part,
+                                            ["target"] = target,
+                                            ["limb"] = limb,
+                                            ["base"] = muzzle,
+                                            ["through_wall"] = true
+                                        }
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            return nil
         end)
     end
 
@@ -22220,13 +22659,36 @@ local backtrack_data = {}
         local now = clock()
         local cache = manipulation["cache"]
 
+        -- The gun-distance check. A packet whose origin sits farther from the
+        -- gun than this is one the server can drop, so no origin beyond it is
+        -- solved, held or reused. The slider writes 0 for off, which restores
+        -- the uncapped search.
+        local limit = flags["ragebot_manipulation_distance"]
+
+        if not limit or limit <= 0 then
+            limit = nil
+        end
+
+        local muzzle = base + vector3_new(0.004, 3.0208, -0.048)
+
         -- The answer is stable for a twentieth of a second: the aim point moves
         -- every frame with the prediction, so the stored limb is followed rather
-        -- than re-solved.
+        -- than re-solved. The point is translated from the limb that was aimed at,
+        -- not from the limb the packet names: those differ when another limb of
+        -- the target crosses the line.
         if cache and cache["target"] == target and now - manipulation["last"] < 0.05 and cache["part"]["Parent"] and (cache["base"] - base)["Magnitude"] < 1 then
-            cache["position"] = aim_position + (cache["part"]["Position"] - hitbox["Position"])
+            -- An origin was legal when it was solved, but the gun has moved
+            -- since. One that no longer passes the check is dropped and the
+            -- solve below looks for another instead of reusing it.
+            if not limit or not cache["origin"] or (cache["origin"] - muzzle)["Magnitude"] <= limit then
+                local aimed = cache["aim_part"] or cache["part"]
 
-            return cache
+                cache["position"] = aim_position + (aimed["Position"] - hitbox["Position"])
+
+                return cache
+            end
+
+            manipulation["cache"] = nil
         end
 
         if manipulation["failed_target"] == target and now - manipulation["failed"] < 0.1 then
@@ -22238,6 +22700,8 @@ local backtrack_data = {}
         manipulation["ensure_filter"]()
 
         local visible = manipulation["visible"]
+        local trace = manipulation["trace"]
+        local reported_part = manipulation["reported_part"]
         local hitboxes = manipulation["calculated_hitboxes"]
         local hitbox_position = hitbox["Position"]
 
@@ -22249,19 +22713,19 @@ local backtrack_data = {}
         -- While the target stays hidden this pass fails on every limb, so it is
         -- repeated at the rate the answer is cached at, not on every call.
         if manipulation["muzzle_target"] ~= target or now - manipulation["muzzle_tick"] >= 0.05 then
-            local muzzle = base + vector3_new(0.004, 3.0208, -0.048)
-
             for _, entry in hitboxes do
                 local part = parts[entry[1]]
 
                 if part then
                     local point = aim_position + (part["Position"] - hitbox_position)
+                    local clear, reached = trace(muzzle, point, character)
 
-                    if visible(muzzle, point, character) then
+                    if clear then
                         local best = {
                             ["origin"] = nil,
                             ["position"] = point,
-                            ["part"] = part,
+                            ["part"] = reported_part(parts, part, reached),
+                            ["aim_part"] = part,
                             ["target"] = target,
                             ["base"] = base,
                             ["through_wall"] = false
@@ -22271,6 +22735,8 @@ local backtrack_data = {}
                         manipulation["cache"] = best
                         manipulation["muzzle_target"] = nil
                         manipulation["hold_target"] = nil
+                        manipulation["hold_kind"] = nil
+                        manipulation["hold_anchor"] = nil
                         manipulation["sweep_target"] = nil
 
                         return best
@@ -22282,36 +22748,72 @@ local backtrack_data = {}
             manipulation["muzzle_tick"] = now
         end
 
-        -- Nothing is visible from the muzzle, so the origin has to move. There is
-        -- no range cap: every origin is scaled to the distance to the target.
+        -- Nothing is visible from the muzzle, so the origin has to move. The
+        -- pattern's offsets are shares of one distance: the shot's own when the
+        -- gun-distance check is off, and the check's radius when it is on, so
+        -- the fallback samples origins the packet may name instead of points
+        -- beside the target that are certain to be dropped.
         local direction = aim_position - base
         local distance = direction["Magnitude"]
         local reach = distance > 0.001 and distance or 1
+        local scale = limit and (reach < limit and reach or limit) or reach
         local flat = vector3_new(direction["X"], 0, direction["Z"])
+        local flat_distance = flat["Magnitude"]
+        local forward = flat_distance > 0.001 and flat / flat_distance or vector3_new(0, 0, 0)
+        -- The pattern's origins are measured from the gun when the check is on,
+        -- so the whole bubble is inside the radius instead of half of it sitting
+        -- under the character's feet, outside the radius and never usable.
+        local pattern_base = limit and muzzle or base
         local pattern = manipulation["pattern"]
 
         local found_limb = nil
         local found_index = nil
         local found_part = nil
+        local found_aim_part = nil
         local found_point = nil
         local found_origin = nil
 
         -- The origin in use is checked first, with one ray. A target that stays
-        -- behind the same wall is answered here and no search runs at all.
+        -- behind the same wall is answered here and no search runs at all. An
+        -- anchored origin is a point in the world and does not move with the
+        -- character; a pattern origin is rebuilt from where the character is now.
         if manipulation["hold_target"] == target then
             local limb = manipulation["hold_limb"]
-            local index = manipulation["hold_origin"]
             local part = parts[hitboxes[limb][1]]
 
             if part then
-                local entry = pattern[index]
-                local origin = base + flat * entry[1] + vector3_new(entry[3] * reach, entry[2] * reach, entry[4] * reach)
                 local point = aim_position + (part["Position"] - hitbox_position)
+                local index = nil
+                local origin = nil
 
-                if visible(origin, point, character) then
+                if manipulation["hold_kind"] == "anchor" then
+                    origin = manipulation["hold_anchor"]
+                else
+                    index = manipulation["hold_origin"]
+
+                    local entry = index and pattern[index]
+
+                    if entry then
+                        origin = pattern_base + forward * (entry[1] * scale) + vector3_new(entry[3] * scale, entry[2] * scale, entry[4] * scale)
+                    end
+                end
+
+                local clear = nil
+                local reached = nil
+
+                -- The origin in use is re-checked against the gun distance too:
+                -- walking away from cover can leave a point that was legal when
+                -- it was solved outside the radius, and it is then no longer one
+                -- the packet should carry.
+                if origin and (not limit or (origin - muzzle)["Magnitude"] <= limit) then
+                    clear, reached = trace(origin, point, character)
+                end
+
+                if clear then
                     found_limb = limb
                     found_index = index
-                    found_part = part
+                    found_part = reported_part(parts, part, reached)
+                    found_aim_part = part
                     found_point = point
                     found_origin = origin
                 end
@@ -22320,7 +22822,41 @@ local backtrack_data = {}
             if not found_limb then
                 -- It no longer sees its limb. Start the search over from the top.
                 manipulation["hold_target"] = nil
+                manipulation["hold_kind"] = nil
+                manipulation["hold_anchor"] = nil
                 manipulation["sweep_target"] = nil
+            end
+        end
+
+        -- Nothing is in use, so the wall itself supplies the origin. One cast
+        -- finds the first obstruction on the limb's sight line and the first gap
+        -- places the origin on the limb's side of it - the least the origin can
+        -- move and still see the limb. This is what makes a shot land on the
+        -- frame the target goes behind cover instead of on whichever frame the
+        -- pattern happens to sample a point that works, and it is exact at any
+        -- range where the pattern only samples the neighbourhood.
+        --
+        -- A pass that finds nothing is not repeated on the next frame; the world
+        -- it reads does not change in 50 milliseconds. A pass that finds something
+        -- is held, so the next call answers with the one-ray check above.
+        if not found_limb and (manipulation["anchor_target"] ~= target or now - manipulation["anchor_tick"] >= 0.05) then
+            local anchored = manipulation["anchor"](target, aim_position, hitbox, muzzle, limit)
+
+            manipulation["anchor_target"] = target
+            manipulation["anchor_tick"] = now
+
+            if anchored then
+                anchored["base"] = base
+
+                found_limb = anchored["limb"]
+                found_index = nil
+                found_part = anchored["part"]
+                found_aim_part = anchored["aim_part"]
+                found_point = anchored["position"]
+                found_origin = anchored["origin"]
+
+                manipulation["hold_kind"] = "anchor"
+                manipulation["hold_anchor"] = anchored["origin"]
             end
         end
 
@@ -22334,8 +22870,22 @@ local backtrack_data = {}
         -- With an origin already in use the search only looks for a heavier limb
         -- than the one held, and rests between passes: the held shot keeps going
         -- out while a better one is looked for.
+        --
+        -- An anchored origin is a point beside the wall, so it can be bettered:
+        -- a point nearer the character that sees the same limb is a peek around
+        -- the edge of the wall, a shot that has to move less to be legal. The
+        -- sweep therefore still looks at the anchored limb, and only takes an
+        -- origin there that is nearer the muzzle than the anchored one.
         local held = found_limb
         local last_limb = held and held - 1 or #hitboxes
+        local anchor_limb = nil
+        local anchor_distance = nil
+
+        if held and manipulation["hold_kind"] == "anchor" and found_origin then
+            last_limb = held
+            anchor_limb = held
+            anchor_distance = (found_origin - muzzle)["Magnitude"]
+        end
 
         if not held or now >= manipulation["sweep_rest"] then
             local limb = 1
@@ -22358,19 +22908,36 @@ local backtrack_data = {}
 
                     while candidate <= count and budget > 0 do
                         local entry = pattern[candidate]
-                        local origin = base + flat * entry[1] + vector3_new(entry[3] * reach, entry[2] * reach, entry[4] * reach)
+                        local origin = pattern_base + forward * (entry[1] * scale) + vector3_new(entry[3] * scale, entry[2] * scale, entry[4] * scale)
+                        local origin_distance = (origin - muzzle)["Magnitude"]
 
                         budget -= 1
 
-                        if visible(origin, point, character) then
-                            found_limb = limb
-                            found_index = candidate
-                            found_part = part
-                            found_point = point
-                            found_origin = origin
-                            hit = true
+                        -- A point outside the check's radius is one the server
+                        -- can drop, so it is not cast at all.
+                        local clear = nil
+                        local reached = nil
 
-                            break
+                        if not limit or origin_distance <= limit then
+                            clear, reached = trace(origin, point, character)
+                        end
+
+                        if clear then
+                            -- On the anchored limb the origin has to beat the wall:
+                            -- a visible point farther from the muzzle than the
+                            -- anchored one is the same through-wall shot with more
+                            -- moved origin, which is no improvement.
+                            if limb ~= anchor_limb or origin_distance < anchor_distance then
+                                found_limb = limb
+                                found_index = candidate
+                                found_part = reported_part(parts, part, reached)
+                                found_aim_part = part
+                                found_point = point
+                                found_origin = origin
+                                hit = true
+
+                                break
+                            end
                         end
 
                         candidate += 1
@@ -22424,11 +22991,12 @@ local backtrack_data = {}
             ["origin"] = found_origin,
             ["position"] = found_point,
             ["part"] = found_part,
+            ["aim_part"] = found_aim_part,
             ["target"] = target,
             ["base"] = base,
             -- The muzzle could not see this limb. The shot goes through a wall
             -- unless the character's own position still has the line.
-            ["through_wall"] = not visible(base, found_point, character)
+            ["through_wall"] = not visible(muzzle, found_point, character)
         }
 
         manipulation["last"] = now
@@ -22436,6 +23004,16 @@ local backtrack_data = {}
         manipulation["hold_target"] = target
         manipulation["hold_limb"] = found_limb
         manipulation["hold_origin"] = found_index
+
+        -- A pattern origin is rebuilt from its entry each call; an anchored one
+        -- is the point itself. The kind decides which the next call uses.
+        if found_index then
+            manipulation["hold_kind"] = "pattern"
+            manipulation["hold_anchor"] = nil
+        else
+            manipulation["hold_kind"] = "anchor"
+            manipulation["hold_anchor"] = found_origin
+        end
 
         return best
     end)
@@ -22882,6 +23460,9 @@ local backtrack_data = {}
     local prediction = 0
 
     local last_auto = clock()
+    -- The center panel samples this at 10 Hz, so writing the global every frame
+    -- only produced 90% of the table walks for a value nobody had read yet.
+    local waiting_protection_tick = 0
 
     local fire_cooldown = flags["fire_cooldown"]/1000
     local target_cooldown = flags["target_selection_cooldown"]
@@ -22985,6 +23566,7 @@ local backtrack_data = {}
         end
 
         ragebot_aim_position = nil
+        ragebot_aim_part = nil
         -- The samples belong to the target they were taken on.
         confidence_samples = {}
         confidence_last_refresh = clock()
@@ -23107,10 +23689,14 @@ local backtrack_data = {}
                 end
             end
 
-            local state = getgenv()["juju"]
+            if tick - waiting_protection_tick > 0.1 then
+                waiting_protection_tick = tick
 
-            if state then
-                state["waiting_protection"] = (waiting ~= nil or (target ~= nil and (target[7] or spawn_guard["check"](target)))) and true or false
+                local state = getgenv()["juju"]
+
+                if state then
+                    state["waiting_protection"] = (waiting ~= nil or (target ~= nil and (target[7] or spawn_guard["check"](target)))) and true or false
+                end
             end
         end
 
@@ -23219,6 +23805,9 @@ local backtrack_data = {}
 
             if hitbox then
                 local hitbox_position = hitbox["Position"]
+
+                -- The manual-shot rewrite in the remote hook fires at this part.
+                ragebot_aim_part = hitbox
 
                 local current_time = clock()
                 local confidence_mode = (flags["resolver_mode"] and flags["resolver_mode"][1]) == "confidence"
@@ -23366,18 +23955,47 @@ local backtrack_data = {}
 
                     if local_gun then
                         local new_local_guns = {}
-                        for handle, local_gun in local_guns do
-                            local parent = handle["Parent"]
+                        local gun_order = auto_equip_gun_names
+                        local gun_count = #gun_order
 
-                            if parent and parent["Name"] == "[Rifle]" then
-                                new_local_guns[#new_local_guns+1] = local_gun
+                        -- The auto equip list first, in its own order: those are
+                        -- the guns that were put in the character's hands, so
+                        -- they are the ones the shots are meant to come from.
+                        -- Every one of them fires; the loop below is not a pick.
+                        for i = 1, gun_count do
+                            local wanted = gun_order[i]
+
+                            for handle, entry in local_guns do
+                                local tool = entry[5] or handle["Parent"]
+
+                                if tool and tool["Name"] == wanted then
+                                    new_local_guns[#new_local_guns+1] = entry
+                                end
                             end
                         end
-                        for handle, local_gun in local_guns do
-                            local parent = handle["Parent"]
 
-                            if parent and parent["Name"] ~= "[Rifle]" then
-                                new_local_guns[#new_local_guns+1] = local_gun
+                        -- Everything else after it, so a gun held by hand that
+                        -- is not on the list still fires. The rifle keeps its old
+                        -- priority among those. Names already taken from the
+                        -- list above are skipped, never fired twice.
+                        for pass = 1, 2 do
+                            for handle, entry in local_guns do
+                                local tool = entry[5] or handle["Parent"]
+
+                                if tool then
+                                    local listed = false
+
+                                    for i = 1, gun_count do
+                                        if tool["Name"] == gun_order[i] then
+                                            listed = true
+                                            break
+                                        end
+                                    end
+
+                                    if not listed and (pass == 1) == (tool["Name"] == "[Rifle]") then
+                                        new_local_guns[#new_local_guns+1] = entry
+                                    end
+                                end
                             end
                         end
 
@@ -23407,9 +24025,18 @@ local backtrack_data = {}
                         local origin = local_server_position["p"] + vector3_new(0.004, 3.0208, -0.048)
 
                         if ragebot_manipulation then
+                            local manip_part = ragebot_manipulation["part"]
+
+                            -- The solve may name a limb that was removed between
+                            -- the solve and the packet (a respawn). A destroyed
+                            -- instance in the packet matches nothing on the server,
+                            -- so the live limb already resolved above is kept.
+                            if manip_part and manip_part["Parent"] then
+                                fire_hitbox = manip_part
+                            end
+
                             pos = ragebot_manipulation["position"]
                             origin = ragebot_manipulation["origin"] or origin
-                            fire_hitbox = ragebot_manipulation["part"] or fire_hitbox
                         end
 
                         -- Only the way the packet leaves differs between the two
@@ -23484,7 +24111,7 @@ local backtrack_data = {}
                                     end
                                 end
 
-                                spawn(get_bullet_result, target[2], fire_hitbox, origin, pos, target_velocity, did_defensive)
+                                spawn(get_bullet_result, target[2], fire_hitbox, origin, pos, target_velocity, did_defensive, ragebot_manipulation and ragebot_manipulation["target"] == target and ragebot_manipulation["aim_part"] or nil)
                             end
                         end
                     end
@@ -24029,6 +24656,10 @@ local backtrack_data = {}
                     follow_target_stop_if_no_gun_equipped = true
                 end
             end
+
+            -- Void hide's "disable when following target" reads this, so it is
+            -- kept in step with what the loop below is actually allowed to do.
+            follow_target_follows_knocked = not follow_target_stop_if_target_knocked
         end)
     end
 
@@ -24832,6 +25463,9 @@ local backtrack_data = {}
             end
 
             heartbeat[#heartbeat+1] = do_target_circle
+            -- Pure arithmetic and Drawing writes: no wait() inside, so it can
+            -- run on the frame thread instead of taking a new coroutine a frame.
+            heartbeat_inline[do_target_circle] = true
         end
     end)
 
@@ -25591,7 +26225,18 @@ local backtrack_data = {}
             -- reached on foot - so the void stands off for it no matter what is
             -- forced. The rest of the line is the "disable when" picks, which a
             -- forced condition overrides.
-            local disabled = (void_hide_disable_when_target_selected and ragebot_target) or (void_hide_disable_when_target_knocked and (flags["ragebot"] and ragebot_target and ragebot_target[18])) or (void_hide_disable_when_following_target and local_following)
+            --
+            -- "following target" is read from the follow toggle and the live
+            -- target, not from local_following. The follow loop refuses to run
+            -- while the character is in the void, so local_following is false
+            -- there and the pick could never fire: the character sat in the
+            -- void with the panel claiming it was following. In the frame this
+            -- stands the void down, in_void clears and the follow loop is free
+            -- to run, which is what local_following then reports. A knocked
+            -- target qualifies only when follow target's own "stop if" list lets
+            -- the loop keep following it, so the two never disagree.
+            local following_target = flags["follow_target"] and ragebot_target ~= nil and not ragebot_target[7] and (follow_target_follows_knocked or not ragebot_target[18])
+            local disabled = (void_hide_disable_when_target_selected and ragebot_target) or (void_hide_disable_when_target_knocked and (flags["ragebot"] and ragebot_target and ragebot_target[18])) or (void_hide_disable_when_following_target and following_target)
 
             if purchasing or (forced and flags["void_hide_stop_if_forced"]) or (disabled and not forced) then
                 -- This frame is not in the void, and a stale "in the void" is
@@ -25762,7 +26407,10 @@ local backtrack_data = {}
     -- > ( auto equip)
 
     do
-        local auto_equip_guns = {"[Rifle]"}
+        -- The list itself lives next to auto fire, so both features read the
+        -- same table: auto equip holds what auto fire shoots.
+        refresh_auto_equip_gun_names()
+
         local fake_local_guns = {}
         local auto_equip_unequip_when_when_no_target = true
         local auto_equip_unequip_when_when_no_target_connection = nil
@@ -25777,21 +26425,17 @@ local backtrack_data = {}
             local backpack = local_player["Backpack"]
             if backpack and not purchasing and hrp and (not auto_equip_unequip_when_when_no_target or ragebot_target ~= nil) then
                 for name, gun in fake_local_guns do
-                    local is_gun = false
-                    for i = 1, #auto_equip_guns do
-                        if name == auto_equip_guns[i] then
-                            -- Only when it is not already held. Handing a tool the
-                            -- parent it already has still fires the child signals on
-                            -- both containers, every frame.
-                            if gun["Parent"] ~= local_character then
-                                setscriptable(gun, "Parent", true)
-                                gun["Parent"] = local_character
-                            end
-
-                            is_gun = true
+                    -- A set, not a scan of the list: this runs every frame for
+                    -- every tool in the backpack.
+                    if auto_equip_gun_set[name] then
+                        -- Only when it is not already held. Handing a tool the
+                        -- parent it already has still fires the child signals on
+                        -- both containers, every frame.
+                        if gun["Parent"] ~= local_character then
+                            setscriptable(gun, "Parent", true)
+                            gun["Parent"] = local_character
                         end
-                    end
-                    if not is_gun and gun["Parent"] == local_character then
+                    elseif gun["Parent"] == local_character then
                         setscriptable(gun, "Parent", true)
                         gun["Parent"] = backpack
                     end
@@ -25879,6 +26523,9 @@ local backtrack_data = {}
 
             if value then
                 heartbeat[#heartbeat+1] = do_auto_equip
+                -- Reparenting only, no wait() inside: this ran as a new coroutine
+                -- every frame for a loop that hands tools back and forth.
+                heartbeat_inline[do_auto_equip] = true
 
                 refresh_backpack_connections()
 
@@ -25909,29 +26556,12 @@ local backtrack_data = {}
             end
         end)
 
-        create_connection(menu_references["auto_equip_gun"]["on_dropdown_change"], function(value)
-            auto_equip_guns = {}
-            for i = 1, #value do
-                local value = value[i]
-                if value == "revolver" then
-                    auto_equip_guns[#auto_equip_guns+1] = "[Revolver]"
-                elseif value == "rifle" then
-                    auto_equip_guns[#auto_equip_guns+1] = "[Rifle]"
-                elseif value == "lmg" then
-                    auto_equip_guns[#auto_equip_guns+1] = "[LMG]"
-                elseif value == "aug" then
-                    auto_equip_guns[#auto_equip_guns+1] = "[AUG]"
-                elseif value == "ak47" then
-                    auto_equip_guns[#auto_equip_guns+1] = "[AK47]"
-                elseif value == "p90" then
-                    auto_equip_guns[#auto_equip_guns+1] = "[P90]"
-                elseif value == "flintlock" then
-                    auto_equip_guns[#auto_equip_guns+1] = "[Flintlock]"
-                elseif value == "double-barrel sg" then
-                    auto_equip_guns[#auto_equip_guns+1] = "[Double-Barrel SG]"
-                end
-            end
-        end)
+        create_connection(menu_references["auto_equip_gun"]["on_dropdown_change"], refresh_auto_equip_gun_names)
+
+        -- A config load writes the flags without firing the dropdown callback,
+        -- so the saved gun list has to be read back here or auto equip and auto
+        -- fire kept using the default rifle until the pick was touched again.
+        create_connection(menu["on_config_loaded"], refresh_auto_equip_gun_names)
     end
 
     -- > ( look at )
@@ -25974,6 +26604,7 @@ local backtrack_data = {}
 
             if value then
                 heartbeat[#heartbeat+1] = do_face_target
+                heartbeat_inline[do_face_target] = true
             end
         end)
     end
@@ -26722,6 +27353,25 @@ local get_backtrack_models = nil
 
     local legitbot_field_of_view = false
 
+    -- Reused by the visibility rays below and rebuilt in place on every call.
+    -- RaycastParams copies the array it is handed, and every slot is written
+    -- before each ray, so one table serves every player instead of a fresh
+    -- six-element table per visible player per frame.
+    local legitbot_filter = {}
+
+    local function legitbot_ray_filter(data)
+        local filter = legitbot_filter
+
+        filter[1] = data[3]
+        filter[2] = local_character
+        filter[3] = ignored
+        filter[4] = bush
+        filter[5] = vehicles
+        filter[6] = get_backtrack_models()
+
+        return filter
+    end
+
     local get_legitbot_target = nil; get_legitbot_target = LPH_NO_VIRTUALIZE(function(dt, getting, bypass)
         local camera_pos = camera["CFrame"]["p"]
         local mouse_pos = get_mouse_location(user_input_service)
@@ -26756,7 +27406,7 @@ local get_backtrack_models = nil
                     if legitbot_untarget_when_not_visible then
                         local distance = hrp_position-camera_pos
 
-                        params["FilterDescendantsInstances"] = {data[3], local_character, ignored, bush, vehicles, get_backtrack_models()}
+                        params["FilterDescendantsInstances"] = legitbot_ray_filter(data)
 
                         if raycast(workspace, camera_pos, distance.unit * distance.Magnitude, params) then
                             set_legitbot_target(legitbot_automatic and get_legitbot_target(dt, true, true) or nil)
@@ -26791,14 +27441,16 @@ local get_backtrack_models = nil
                         if legitbot_ignore_if_not_visible then
                             local distance = hrp_position-camera_pos
 
-                            params["FilterDescendantsInstances"] = {data[3], local_character, ignored, bush, vehicles, get_backtrack_models()}
+                            params["FilterDescendantsInstances"] = legitbot_ray_filter(data)
                             if raycast(workspace, camera_pos, distance.unit * distance.Magnitude, params) then
                                 legitbot_dont_aim = true
                                 return
                             end
                         end
 
-                        legitbot_target = {data, hrp, (vector2_new(position["X"], position["Y"]) - mouse_pos)["Magnitude"]}
+                        local delta_x = position["X"] - mouse_pos["X"]
+                        local delta_y = position["Y"] - mouse_pos["Y"]
+                        legitbot_target = {data, hrp, sqrt(delta_x*delta_x + delta_y*delta_y)}
                         legitbot_dont_aim = false
 
                         return legitbot_target
@@ -26812,12 +27464,19 @@ local get_backtrack_models = nil
         end
 
         last_target_dt = dt
-        local targets = {}
 
         local local_client_position = local_client_position["p"]
-        local mouse_position = get_mouse_location(user_input_service)
-        
+        local mouse_x = mouse_pos["X"]
+        local mouse_y = mouse_pos["Y"]
+
         local field_of_view = legitbot_field_of_view and (camera["ViewportSize"]["Magnitude"]/(pi/2))*legitbot_field_of_view or false
+
+        -- The closest target is kept while walking the players instead of
+        -- collecting every candidate into a table and sorting it afterwards.
+        -- That was one table, one candidate table and one Vector2 per visible
+        -- player, every frame, for an answer this loop can hold in two locals.
+        local closest = math["huge"]
+        local best = nil
 
         for player, data in player_data do
             if not data[7] and not data[18] then
@@ -26835,16 +27494,20 @@ local get_backtrack_models = nil
                             if legitbot_ignore_if_invulnerable and ((parts["FORCEFIELD"] or parts["ForceField"]) or parts["GRABBING_CONSTRAINT"]) then
                                 continue
                             end
-                            local distance = (vector2_new(position["X"], position["Y"]) - mouse_pos)["Magnitude"]
+
+                            local delta_x = position["X"] - mouse_x
+                            local delta_y = position["Y"] - mouse_y
+                            local distance = sqrt(delta_x*delta_x + delta_y*delta_y)
 
                             if field_of_view and distance > field_of_view then
                                 continue
                             end
                             if legitbot_ignore_if_not_visible then
-                                local distance = hrp_position-camera_pos
+                                local ray = hrp_position-camera_pos
 
-                                params["FilterDescendantsInstances"] = {data[3], local_character, ignored, bush, vehicles, get_backtrack_models()}
-                                if raycast(workspace, camera_pos, distance.unit * distance.Magnitude, params) then
+                                params["FilterDescendantsInstances"] = legitbot_ray_filter(data)
+
+                                if raycast(workspace, camera_pos, ray.unit * ray.Magnitude, params) then
                                     continue
                                 end
                             end
@@ -26852,21 +27515,13 @@ local get_backtrack_models = nil
                                 continue
                             end
 
-                            targets[#targets+1] = {data, hrp, distance}
+                            if distance < closest then
+                                closest = distance
+                                best = {data, hrp, distance}
+                            end
                         end
                     end
                 end
-            end
-        end
-
-        local closest = math["huge"]
-        local best = nil
-        for i = 1, #targets do
-            local target = targets[i]
-            local distance = target[3]
-            if distance < closest then
-                closest = distance
-                best = target
             end
         end
 
@@ -26881,6 +27536,8 @@ local get_backtrack_models = nil
 
     local get_closest_part = LPH_NO_VIRTUALIZE(function(data)
         local mouse_pos = get_mouse_location(user_input_service)
+        local mouse_x = mouse_pos["X"]
+        local mouse_y = mouse_pos["Y"]
 
         local parts = data[4]
         local closest = math["huge"]
@@ -26892,7 +27549,11 @@ local get_backtrack_models = nil
             if body_part then
                 local pos, on_screen = world_to_viewport_point(camera, body_part["Position"])
                 if on_screen then
-                    local distance = (mouse_pos - vector2_new(pos["X"], pos["Y"])).Magnitude
+                    -- Scalar distance, not a subtraction and a Magnitude on a
+                    -- fresh Vector2 per limb: this walks fifteen parts per call.
+                    local delta_x = pos["X"] - mouse_x
+                    local delta_y = pos["Y"] - mouse_y
+                    local distance = sqrt(delta_x*delta_x + delta_y*delta_y)
                     if distance < closest then
                         closest = distance
                         closest_part = part
@@ -27817,8 +28478,19 @@ local get_backtrack_models = nil
             return backtrack_data[player] and backtrack_data[player][3] or nil
         end)
 
+        -- One table for every caller. The list is read straight into a
+        -- RaycastParams and never kept, and this used to allocate a table plus a
+        -- fresh array per visible player per frame while visibility checks were
+        -- on. The contents are rebuilt on every call, so a caller never sees a
+        -- stale model.
+        local backtrack_models = {}
+
         get_backtrack_models = LPH_JIT_MAX(function()
-            local models = {}
+            local models = backtrack_models
+
+            for i = #models, 1, -1 do
+                models[i] = nil
+            end
 
             for player, data in backtrack_data do
                 local model = data[1]
@@ -29875,28 +30547,38 @@ end)()
 -- The character that was already up when the hub was executed was built before
 -- any of its hooks existed, so it can still be carrying what the previous
 -- session left on it -- a tool, a skin, an effect -- and every per-character
--- feature sets itself up on the spawn it saw. One reset after the load gives
--- the hub a character it watched spawn from the start. Loading during the menu
--- or while the player is dead leaves nothing to reset; the first character
--- that lands is used instead.
-spawn(function()
-    local started = clock()
+-- feature sets itself up on the spawn it saw. One reset of that body gives the
+-- hub a character it watched spawn from the start.
+--
+-- Only the body that existed at load is reset. One that arrives afterwards --
+-- from the menu, from a death already in progress -- grew up under the hub's
+-- hooks and is exactly what the reset is meant to produce, so killing it would
+-- be a second death for nothing. The snapshot is taken once, here; nothing
+-- polls for a character to kill.
+do
+    local character = local_player["Character"]
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 
-    while clock() - started < 8 do
-        local character = local_player["Character"]
-        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-
-        if humanoid and humanoid["Health"] > 0 then
+    if humanoid and humanoid["Health"] > 0 then
+        spawn(function()
             -- Let the menu and the character hooks finish setting up before the
             -- respawn replaces the body.
             wait(1.5)
-            humanoid["Health"] = 0
-            return
-        end
 
-        wait(0.25)
+            -- A death, a respawn or a teleport in the meantime has already given
+            -- the hub a body it saw spawn; the one this was meant for is gone.
+            if local_player["Character"] ~= character then
+                return
+            end
+
+            humanoid = character:FindFirstChildOfClass("Humanoid")
+
+            if humanoid and humanoid["Health"] > 0 then
+                humanoid["Health"] = 0
+            end
+        end)
     end
-end)
+end
 
 end, function(err)
     local ok, trace = pcall(debug.traceback, "", 2)
