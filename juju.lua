@@ -17770,29 +17770,21 @@ end
         menu_references["box_settings"] = menu_references["box"]:create_settings()
         menu_references["box_outline"] = menu_references["box_settings"]:create_element({["name"] = "outline"}, {["colorpicker"] = {["color_flag"] = "box_outline_color", ["transparency_flag"] = "box_outline_transparency", ["default_color"] = color3_fromrgb(30, 30, 30), ["default_transparency"] = 0}})
         menu_references["box_color"] = menu_references["box_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "box_color", ["transparency_flag"] = "box_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_box_color"] = menu_references["box_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_box_color", ["transparency_flag"] = "enemy_box_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["friendly_box_color"] = menu_references["box_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_box_color", ["transparency_flag"] = "friendly_box_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
 
     menu_references["name"] = menu_references["esp_section"]:create_element({["name"] = "name"}, {["toggle"] = {["flag"] = "name"}})
         menu_references["name_settings"] = menu_references["name"]:create_settings()
         menu_references["name_use_display"] = menu_references["name_settings"]:create_element({["name"] = "use display name"}, {["toggle"] = {["flag"] = "name_use_display"}})
         menu_references["name_color"] = menu_references["name_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "name_color", ["transparency_flag"] = "name_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_name_color"] = menu_references["name_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_name_color", ["transparency_flag"] = "enemy_name_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["friendly_name_color"] = menu_references["name_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_name_color", ["transparency_flag"] = "friendly_name_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
 
     menu_references["image"] = menu_references["esp_section"]:create_element({["name"] = "image"}, {["toggle"] = {["flag"] = "image"}})
         menu_references["image_settings"] = menu_references["image"]:create_settings()
         menu_references["image_value"] = menu_references["image_settings"]:create_element({["name"] = "image"}, {["dropdown"] = {["options"] = {"gradient fill", "fill", "glow"}, ["requires_one"] = true, ["flag"] = "image_value", ["default"] = {"glow"}}})
         menu_references["image_color"] = menu_references["image_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "image_color", ["transparency_flag"] = "image_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0.85}})
-        menu_references["enemy_image_color"] = menu_references["image_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_image_color", ["transparency_flag"] = "enemy_image_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0.85}})
-        menu_references["friendly_image_color"] = menu_references["image_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_image_color", ["transparency_flag"] = "friendly_image_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0.85}})
 
     menu_references["chams"] = menu_references["esp_section"]:create_element({["name"] = "chams"}, {["toggle"] = {["flag"] = "chams"}})
         menu_references["chams_settings"] = menu_references["chams"]:create_settings()
         menu_references["chams_behind_walls"] = menu_references["chams_settings"]:create_element({["name"] = "behind walls"}, {["toggle"] = {["flag"] = "chams_behind_walls", ["default"] = true}})
         menu_references["chams_color"] = menu_references["chams_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "chams_color", ["transparency_flag"] = "chams_transparency", ["default_color"] = color3_fromrgb(249, 217, 255), ["default_transparency"] = 0.5}})
-        menu_references["enemy_chams_color"] = menu_references["chams_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_chams_color", ["transparency_flag"] = "enemy_chams_transparency", ["default_color"] = color3_fromrgb(249, 217, 255), ["default_transparency"] = 0.5}})
-        menu_references["friendly_chams_color"] = menu_references["chams_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_chams_color", ["transparency_flag"] = "friendly_chams_transparency", ["default_color"] = color3_fromrgb(249, 217, 255), ["default_transparency"] = 0.5}})
 
     menu_references["material"] = menu_references["esp_section"]:create_element({["name"] = "material"}, {["toggle"] = {["flag"] = "material"}})
         menu_references["material_settings"] = menu_references["material"]:create_settings()
@@ -17800,63 +17792,49 @@ end
         menu_references["material_behind_walls"] = menu_references["material_settings"]:create_element({["name"] = "behind walls"}, {["toggle"] = {["flag"] = "material_behind_walls", ["default"] = false}})
         menu_references["material_glow"] = menu_references["material_settings"]:create_element({["name"] = "glow (quality 3)"}, {["toggle"] = {["flag"] = "material_glow"}})
         menu_references["material_color"] = menu_references["material_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "material_color", ["transparency_flag"] = "material_transparency", ["default_color"] = color3_fromrgb(249, 217, 255), ["default_transparency"] = 0.2}})
-        menu_references["enemy_material_color"] = menu_references["material_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_material_color", ["transparency_flag"] = "enemy_material_transparency", ["default_color"] = color3_fromrgb(249, 217, 255), ["default_transparency"] = 0.2}})
-        menu_references["friendly_material_color"] = menu_references["material_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_material_color", ["transparency_flag"] = "friendly_material_transparency", ["default_color"] = color3_fromrgb(249, 217, 255), ["default_transparency"] = 0.2}})
 
     menu_references["tool_text"] = menu_references["esp_section"]:create_element({["name"] = "tool text"}, {["toggle"] = {["flag"] = "tool_text"}})
         menu_references["tool_text_settings"] = menu_references["tool_text"]:create_settings()
         menu_references["tool_text_casing"] = menu_references["tool_text_settings"]:create_element({["name"] = "casing"}, {["dropdown"] = {["options"] = {"uppercase", "lowercase"}, ["requires_one"] = true, ["flag"] = "tool_text_casing", ["default"] = {"lowercase"}}})
         menu_references["tool_text_color"] = menu_references["tool_text_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "tool_text_color", ["transparency_flag"] = "tool_text_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_tool_text_color"] = menu_references["tool_text_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_tool_text_color", ["transparency_flag"] = "enemy_tool_text_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["friendly_tool_text_color"] = menu_references["tool_text_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_tool_text_color", ["transparency_flag"] = "friendly_tool_text_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
 
     menu_references["tool_icon"] = menu_references["esp_section"]:create_element({["name"] = "tool icon"}, {["toggle"] = {["flag"] = "tool_icon"}})
         menu_references["tool_icon_settings"] = menu_references["tool_icon"]:create_settings()
         menu_references["tool_icon_color"] = menu_references["tool_icon_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "tool_icon_color", ["transparency_flag"] = "tool_icon_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_tool_icon_color"] = menu_references["tool_icon_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_tool_icon_color", ["transparency_flag"] = "enemy_tool_icon_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["friendly_tool_icon_color"] = menu_references["tool_icon_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_tool_icon_color", ["transparency_flag"] = "friendly_tool_icon_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
 
     menu_references["highlight"] = menu_references["esp_section"]:create_element({["name"] = "highlight"}, {["toggle"] = {["flag"] = "highlight"}})
         menu_references["highlight_settings"] = menu_references["highlight"]:create_settings()
         menu_references["highlight_behind_walls"] = menu_references["highlight_settings"]:create_element({["name"] = "behind walls"}, {["toggle"] = {["flag"] = "highlight_behind_walls", ["default"] = true}})
         menu_references["highlight_color"] = menu_references["highlight_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "highlight_color", ["transparency_flag"] = "highlight_transparency", ["default_color"] = color3_fromrgb(0, 0, 0), ["default_transparency"] = 0.9}})
-        menu_references["enemy_highlight_color"] = menu_references["highlight_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_highlight_color", ["transparency_flag"] = "enemy_highlight_transparency", ["default_color"] = color3_fromrgb(0, 0, 0), ["default_transparency"] = 0.9}})
-        menu_references["friendly_highlight_color"] = menu_references["highlight_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_highlight_color", ["transparency_flag"] = "friendly_highlight_transparency", ["default_color"] = color3_fromrgb(0, 0, 0), ["default_transparency"] = 0.9}})
         menu_references["highlight_outline_color"] = menu_references["highlight_settings"]:create_element({["name"] = "outline color"}, {["colorpicker"] = {["color_flag"] = "highlight_outline_color", ["transparency_flag"] = "highlight_outline_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0.2}})
-        menu_references["enemy_highlight_outline_color"] = menu_references["highlight_settings"]:create_element({["name"] = "enemy outline color"}, {["colorpicker"] = {["color_flag"] = "enemy_highlight_outline_color", ["transparency_flag"] = "enemy_highlight_outline_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0.2}})
-        menu_references["friendly_highlight_outline_color"] = menu_references["highlight_settings"]:create_element({["name"] = "friendly outline color"}, {["colorpicker"] = {["color_flag"] = "friendly_highlight_outline_color", ["transparency_flag"] = "friendly_highlight_outline_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0.2}})
 
     menu_references["armor_bar"] = menu_references["esp_section"]:create_element({["name"] = "armor bar"}, {["toggle"] = {["flag"] = "armor_bar"}})
         menu_references["armor_bar_settings"] = menu_references["armor_bar"]:create_settings()
         menu_references["armor_bar_hide_if_empty"] = menu_references["armor_bar_settings"]:create_element({["name"] = "hide if no armor"}, {["toggle"] = {["flag"] = "armor_bar_hide_if_empty"}})
         menu_references["armor_bar_gradient"] = menu_references["armor_bar_settings"]:create_element({["name"] = "gradient"}, {["toggle"] = {["flag"] = "armor_bar_gradient"}, ["colorpicker"] = {["color_flag"] = "armor_bar_gradient_color", ["transparency_flag"] = "armor_bar_gradient_transparency", ["default_color"] = color3_fromrgb(105, 205, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_armor_bar_gradient"] = menu_references["armor_bar_settings"]:create_element({["name"] = "enemy gradient"}, {["colorpicker"] = {["color_flag"] = "enemy_armor_bar_gradient_color", ["transparency_flag"] = "enemy_armor_bar_gradient_transparency", ["default_color"] = color3_fromrgb(105, 205, 255), ["default_transparency"] = 0}})
-        menu_references["friendly_armor_bar_gradient"] = menu_references["armor_bar_settings"]:create_element({["name"] = "friendly gradient"}, {["colorpicker"] = {["color_flag"] = "friendly_armor_bar_gradient_color", ["transparency_flag"] = "friendly_armor_bar_gradient_transparency", ["default_color"] = color3_fromrgb(105, 205, 255), ["default_transparency"] = 0}})
+        menu_references["armor_bar_live"] = menu_references["armor_bar_settings"]:create_element({["name"] = "live gradient"}, {["toggle"] = {["flag"] = "armor_bar_live", ["default"] = true}})
+        menu_references["armor_bar_live_speed"] = menu_references["armor_bar_settings"]:create_element({["name"] = "live speed"}, {["slider"] = {["flag"] = "armor_bar_live_speed", ["min"] = 1, ["max"] = 100, ["default"] = 25, ["suffix"] = "%", ["prefix"] = ""}})
+        menu_references["armor_bar_live_direction"] = menu_references["armor_bar_settings"]:create_element({["name"] = "live direction"}, {["dropdown"] = {["flag"] = "armor_bar_live_direction", ["options"] = {"down", "up"}, ["default"] = {"down"}, ["requires_one"] = true}})
+        menu_references["armor_bar_live_repeats"] = menu_references["armor_bar_settings"]:create_element({["name"] = "color repeats"}, {["slider"] = {["flag"] = "armor_bar_live_repeats", ["min"] = 1, ["max"] = 8, ["default"] = 2, ["suffix"] = "x", ["prefix"] = ""}})
+        menu_references["armor_bar_live_blend"] = menu_references["armor_bar_settings"]:create_element({["name"] = "middle mix"}, {["slider"] = {["flag"] = "armor_bar_live_blend", ["min"] = 0, ["max"] = 100, ["default"] = 100, ["suffix"] = "%", ["prefix"] = "", ["min_text"] = "hard"}})
         menu_references["armor_bar_outline"] = menu_references["armor_bar_settings"]:create_element({["name"] = "outline"}, {["colorpicker"] = {["color_flag"] = "armor_bar_outline_color", ["transparency_flag"] = "armor_bar_outline_transparency", ["default_color"] = color3_fromrgb(30, 30, 30), ["default_transparency"] = 0}})
         menu_references["armor_bar_color"] = menu_references["armor_bar_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "armor_bar_color", ["transparency_flag"] = "armor_bar_transparency", ["default_color"] = color3_fromrgb(0, 155, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_armor_bar_color"] = menu_references["armor_bar_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_armor_bar_color", ["transparency_flag"] = "enemy_armor_bar_transparency", ["default_color"] = color3_fromrgb(0, 155, 255), ["default_transparency"] = 0}})
-        menu_references["friendly_armor_bar_color"] = menu_references["armor_bar_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_armor_bar_color", ["transparency_flag"] = "friendly_armor_bar_transparency", ["default_color"] = color3_fromrgb(0, 155, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_armor_bar_gradient"]:set_visible(false)
-        menu_references["friendly_armor_bar_gradient"]:set_visible(false)
 
     menu_references["health_bar"] = menu_references["esp_section"]:create_element({["name"] = "health bar"}, {["toggle"] = {["flag"] = "health_bar"}})
         menu_references["health_bar_settings"] = menu_references["health_bar"]:create_settings()
         menu_references["health_bar_gradient"] = menu_references["health_bar_settings"]:create_element({["name"] = "gradient"}, {["toggle"] = {["flag"] = "health_bar_gradient"}, ["colorpicker"] = {["color_flag"] = "health_bar_gradient_color", ["transparency_flag"] = "health_bar_gradient_transparency", ["default_color"] = color3_fromrgb(105, 205, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_health_bar_gradient"] = menu_references["health_bar_settings"]:create_element({["name"] = "enemy gradient"}, {["colorpicker"] = {["color_flag"] = "enemy_health_bar_gradient_color", ["transparency_flag"] = "enemy_health_bar_gradient_transparency", ["default_color"] = color3_fromrgb(105, 205, 255), ["default_transparency"] = 0}})
-        menu_references["friendly_health_bar_gradient"] = menu_references["health_bar_settings"]:create_element({["name"] = "friendly gradient"}, {["colorpicker"] = {["color_flag"] = "friendly_health_bar_gradient_color", ["transparency_flag"] = "friendly_health_bar_gradient_transparency", ["default_color"] = color3_fromrgb(105, 205, 255), ["default_transparency"] = 0}})
+        menu_references["health_bar_live"] = menu_references["health_bar_settings"]:create_element({["name"] = "live gradient"}, {["toggle"] = {["flag"] = "health_bar_live", ["default"] = true}})
+        menu_references["health_bar_live_speed"] = menu_references["health_bar_settings"]:create_element({["name"] = "live speed"}, {["slider"] = {["flag"] = "health_bar_live_speed", ["min"] = 1, ["max"] = 100, ["default"] = 25, ["suffix"] = "%", ["prefix"] = ""}})
+        menu_references["health_bar_live_direction"] = menu_references["health_bar_settings"]:create_element({["name"] = "live direction"}, {["dropdown"] = {["flag"] = "health_bar_live_direction", ["options"] = {"down", "up"}, ["default"] = {"down"}, ["requires_one"] = true}})
+        menu_references["health_bar_live_repeats"] = menu_references["health_bar_settings"]:create_element({["name"] = "color repeats"}, {["slider"] = {["flag"] = "health_bar_live_repeats", ["min"] = 1, ["max"] = 8, ["default"] = 2, ["suffix"] = "x", ["prefix"] = ""}})
+        menu_references["health_bar_live_blend"] = menu_references["health_bar_settings"]:create_element({["name"] = "middle mix"}, {["slider"] = {["flag"] = "health_bar_live_blend", ["min"] = 0, ["max"] = 100, ["default"] = 100, ["suffix"] = "%", ["prefix"] = "", ["min_text"] = "hard"}})
         menu_references["health_bar_outline"] = menu_references["health_bar_settings"]:create_element({["name"] = "outline"}, {["colorpicker"] = {["color_flag"] = "health_bar_outline_color", ["transparency_flag"] = "health_bar_outline_transparency", ["default_color"] = color3_fromrgb(30, 30, 30), ["default_transparency"] = 0}})
         menu_references["health_bar_color"] = menu_references["health_bar_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "health_bar_color", ["transparency_flag"] = "health_bar_transparency", ["default_color"] = color3_fromrgb(0, 255, 0), ["default_transparency"] = 0}})
-        menu_references["enemy_health_bar_color"] = menu_references["health_bar_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_health_bar_color", ["transparency_flag"] = "enemy_health_bar_transparency", ["default_color"] = color3_fromrgb(0, 255, 0), ["default_transparency"] = 0}})
-        menu_references["friendly_health_bar_color"] = menu_references["health_bar_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_health_bar_color", ["transparency_flag"] = "friendly_health_bar_transparency", ["default_color"] = color3_fromrgb(0, 255, 0), ["default_transparency"] = 0}})
-        menu_references["enemy_health_bar_gradient"]:set_visible(false)
-        menu_references["friendly_health_bar_gradient"]:set_visible(false)
 
     menu_references["health_text"] = menu_references["esp_section"]:create_element({["name"] = "health text"}, {["toggle"] = {["flag"] = "health_text"}})
         menu_references["health_text_settings"] = menu_references["health_text"]:create_settings()
         menu_references["health_text_hide_if_full"] = menu_references["health_text_settings"]:create_element({["name"] = "hide if full"}, {["toggle"] = {["flag"] = "health_text_hide_if_full"}})
         menu_references["health_text_color"] = menu_references["health_text_settings"]:create_element({["name"] = "color"}, {["colorpicker"] = {["color_flag"] = "health_text_color", ["transparency_flag"] = "health_text_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["enemy_health_text_color"] = menu_references["health_text_settings"]:create_element({["name"] = "enemy color"}, {["colorpicker"] = {["color_flag"] = "enemy_health_text_color", ["transparency_flag"] = "enemy_health_text_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
-        menu_references["friendly_health_text_color"] = menu_references["health_text_settings"]:create_element({["name"] = "friendly color"}, {["colorpicker"] = {["color_flag"] = "friendly_health_text_color", ["transparency_flag"] = "friendly_health_text_transparency", ["default_color"] = color3_fromrgb(255, 255, 255), ["default_transparency"] = 0}})
 
     menu_references["fonts"] = menu_references["esp_section"]:create_element({["name"] = "fonts"}, {}):create_settings()
         menu_references["main_font"] = menu_references["fonts"]:create_element({["name"] = "main font"}, {["dropdown"] = {["options"] = {"0", "1", "2", "3"}, ["requires_one"] = true, ["flag"] = "main_font", ["default"] = identifyexecutor() == "Wave" and {"1"} or {"2"}}})
@@ -17877,9 +17855,11 @@ end
     local do_health_bar = false
         local health_bar_offset = vector2_new(6, 1)
         local do_health_bar_gradient = false
+        local do_health_bar_live = true
 
     local do_armor_bar = false
         local do_armor_bar_gradient = false
+        local do_armor_bar_live = true
         local hide_armor_bar_if_empty = false
         local armor_bar_offset = vector2_new(6, 1)
 
@@ -17969,26 +17949,13 @@ end
         [3] = 1
     }
 
+    -- Colors are global: friendly, neutral and enemy all share one table, so
+    -- every lookup by status reads the same values the menu writes.
     do
-        local old_alt_information = alt_information[1]
-        local old_transparencies = transparencies[1]
-        local old_colors = colors[1]
-
         for i = 2, 3 do
-            local new_alt_information = {}
-
-            local new_transparencies = {}
-            local new_colors = {}
-            for i = 1, #old_transparencies do
-                new_transparencies[i] = old_transparencies[i]
-                new_colors[i] = old_colors[i]
-            end
-            for i = 1, #old_alt_information do
-                new_alt_information[i] = old_alt_information[i]
-            end
-            alt_information[i] = new_alt_information
-            transparencies[i] = new_transparencies
-            colors[i] = new_colors
+            alt_information[i] = alt_information[1]
+            transparencies[i] = transparencies[1]
+            colors[i] = colors[1]
         end
     end
 
@@ -18529,7 +18496,247 @@ end
         })
     end)
 
-    local bar_half_gradient_data = base64_decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAACACAYAAADK+QP0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAACUSURBVChTbVHRFQMhDFLjEA7T/ecqoXBRe3woJIjm2dZanwH0XLABIyLEDLJdls+ypYznmCxkB2Q22GUMa+wmAUPcLr1gy+JbA9gZfWQV5RoujWhnCrtjzDnVsLkWvpRRnPeyUNZslLooxSMvVvIKUCggn3HdoQFL5v4LBd7yCDUqwGcrhVCe8efzw6+U3WKcX9H7F7u/BOHzO9gQAAAAAElFTkSuQmCC")
+    local live_bar_states = {}
+    local live_bar_gui = nil
+    -- Scroll phase per bar kind (4 = health, 10 = armor). The "live" toggle
+    -- of a kind freezes its phase, so its gradient stays still where it is.
+    local live_bar_phases = {[4] = 0, [10] = 0}
+    -- Per bar kind: speed in cycles per second, direction 1 = down / -1 = up,
+    -- repeats = colour cycles shown on a full bar, blend 0 = hard stripes to
+    -- 1 = smooth. Defaults match the original look (0.5 cps, 2 repeats).
+    local live_bar_settings = {
+        [4] = {speed = 0.5, direction = 1, repeats = 2, blend = 1},
+        [10] = {speed = 0.5, direction = 1, repeats = 2, blend = 1}
+    }
+    unload_lists[#unload_lists + 1] = live_bar_states
+
+    -- Slice layout for one bar kind. n repeats need n + 1 slices, each 1/n of
+    -- the bar, so a spare slice always covers the gap the scroll opens.
+    local live_bar_positions = LPH_NO_VIRTUALIZE(function(phase, repeats)
+        local positions = {}
+        for i = 1, repeats + 1 do
+            positions[i] = udim2_new(0, 0, (i - 1 - phase) / repeats, 0)
+        end
+        return positions
+    end)
+
+    -- Keep animation outside the ESP layout cache: stationary players still
+    -- need their slices to move. All bars share one non-yielding frame callback.
+    local animate_live_bars = LPH_NO_VIRTUALIZE(function(dt)
+        local moved = {}
+        for kind, live in pairs({[4] = do_health_bar_live, [10] = do_armor_bar_live}) do
+            if live then
+                local settings = live_bar_settings[kind]
+                live_bar_phases[kind] = (live_bar_phases[kind] + dt * settings.speed * settings.direction) % 1
+                moved[kind] = live_bar_positions(live_bar_phases[kind], settings.repeats)
+            end
+        end
+        for state in pairs(live_bar_states) do
+            local positions = moved[state.kind]
+            if positions and state.fill.Visible then
+                local slices = state.slices
+                for i = 1, #slices do
+                    slices[i].Position = positions[i]
+                end
+            end
+        end
+    end)
+
+    local create_live_bar = LPH_NO_VIRTUALIZE(function(bar_colors, bar_opacities, index, rendering)
+        if not live_bar_gui then
+            live_bar_gui = create_instance("ScreenGui", {
+                Name = "juju_live_bars",
+                IgnoreGuiInset = true,
+                ResetOnSpawn = false,
+                DisplayOrder = 10,
+                ZIndexBehavior = Enum.ZIndexBehavior.Global,
+                Parent = core_gui
+            })
+            heartbeat[#heartbeat + 1] = animate_live_bars
+            heartbeat_inline[animate_live_bars] = true
+        end
+
+        -- The outline must also use GUI rendering. A filled Drawing outline
+        -- would otherwise cover the UIGradient in external drawing backends.
+        local outline = create_instance("Frame", {
+            BackgroundColor3 = bar_colors[index + 1],
+            BackgroundTransparency = 1 - bar_opacities[index + 1],
+            BorderSizePixel = 0,
+            Size = udim2_new(0, 0, 0, 0),
+            Visible = false,
+            ZIndex = 2,
+            Parent = live_bar_gui
+        })
+        local fill = create_instance("Frame", {
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ClipsDescendants = true,
+            Size = udim2_new(0, 0, 0, 0),
+            Visible = false,
+            ZIndex = 3,
+            Parent = live_bar_gui
+        })
+        local state = {kind = index, fill = fill, slices = {}, gradients = {}, destroyed = false}
+        local properties = {}
+        for i = 1, 3 do
+            properties[i] = {
+                Color = bar_colors[index + i - 1],
+                Transparency = bar_opacities[index + i - 1],
+                Position = zero_size,
+                Size = zero_size,
+                Visible = rendering
+            }
+        end
+
+        -- Each slice runs A / mix / B / mix / A, including the join. Slices
+        -- are rebuilt when the repeat count changes, so they live in a helper.
+        local refresh_colors, refresh_opacity
+
+        state.build_slices = function()
+            for i = 1, #state.slices do
+                state.slices[i]:Destroy()
+            end
+            state.slices, state.gradients = {}, {}
+
+            local repeats = live_bar_settings[index].repeats
+            local positions = live_bar_positions(live_bar_phases[index], repeats)
+            for i = 1, repeats + 1 do
+                local slice = create_instance("Frame", {
+                    BackgroundColor3 = color3_fromrgb(255, 255, 255),
+                    BackgroundTransparency = 0,
+                    BorderSizePixel = 0,
+                    Size = udim2_new(1, 0, 1 / repeats, 0),
+                    Position = positions[i],
+                    ZIndex = 3,
+                    Parent = fill
+                })
+                state.slices[i] = slice
+                state.gradients[i] = create_instance("UIGradient", {
+                    Rotation = 90,
+                    Parent = slice
+                })
+            end
+
+            if refresh_colors then
+                refresh_colors()
+                refresh_opacity()
+            end
+        end
+
+        -- Keypoint layout as roles (1 = A, 2 = mix, 3 = B). Blend 1 is a fully
+        -- smooth A / B / A ramp; blend 0 is hard stripes. The width is kept
+        -- inside (0.001, 0.249) so keypoint times always strictly increase.
+        local gradient_layout = function()
+            local w = clamp(0.25 * live_bar_settings[index].blend, 0.001, 0.249)
+            return {
+                {0, 1}, {0.25 - w, 1}, {0.25, 2}, {0.25 + w, 3},
+                {0.75 - w, 3}, {0.75, 2}, {0.75 + w, 1}, {1, 1}
+            }
+        end
+
+        refresh_colors = function()
+            local first, second = properties[1].Color, properties[3].Color
+            local values = {first, color3_lerp(first, second, 0.5), second}
+            local keypoints = {}
+            for i, point in ipairs(gradient_layout()) do
+                keypoints[i] = ColorSequenceKeypoint.new(point[1], values[point[2]])
+            end
+            local sequence = ColorSequence.new(keypoints)
+            for i = 1, #state.gradients do state.gradients[i].Color = sequence end
+        end
+        refresh_opacity = function()
+            -- Drawing values are opacity; UIGradient values are transparency.
+            local first = 1 - clamp(properties[1].Transparency, 0, 1)
+            local second = 1 - clamp(properties[3].Transparency, 0, 1)
+            local values = {first, (first + second) * 0.5, second}
+            local keypoints = {}
+            for i, point in ipairs(gradient_layout()) do
+                keypoints[i] = NumberSequenceKeypoint.new(point[1], values[point[2]])
+            end
+            local sequence = NumberSequence.new(keypoints)
+            for i = 1, #state.gradients do state.gradients[i].Transparency = sequence end
+        end
+        state.refresh_colors = refresh_colors
+        state.refresh_opacity = refresh_opacity
+        state.build_slices()
+        local refresh_visibility = function()
+            local size = properties[1].Size
+            fill.Visible = properties[1].Visible and properties[3].Visible
+                and size.X > 0 and size.Y > 0
+            local outline_size = properties[2].Size
+            outline.Visible = properties[2].Visible and outline_size.X > 0 and outline_size.Y > 0
+        end
+        local destroy_bar = function()
+            if state.destroyed then return end
+            state.destroyed = true
+            live_bar_states[state] = nil
+            fill:Destroy()
+            outline:Destroy()
+        end
+
+        -- Preserve the drawing slots consumed by layout, color pickers, fades,
+        -- visibility updates and teardown without changing those call sites.
+        local proxies = {}
+        for i = 1, 3 do
+            local role = i
+            local values = properties[role]
+            proxies[role] = setmetatable({}, {
+                __index = function(_, key)
+                    if key == "Destroy" or key == "Remove" then return destroy_bar end
+                    if key == "Destroyed" then return state.destroyed end
+                    return values[key]
+                end,
+                __newindex = function(_, key, value)
+                    if state.destroyed or values[key] == value then return end
+                    values[key] = value
+                    if key == "Color" then
+                        if role == 2 then outline.BackgroundColor3 = value else refresh_colors() end
+                    elseif key == "Transparency" then
+                        if role == 2 then
+                            outline.BackgroundTransparency = 1 - clamp(value, 0, 1)
+                        else
+                            refresh_opacity()
+                        end
+                    elseif key == "Position" or key == "Size" then
+                        -- The old image overlay had a one-pixel overhang. The
+                        -- primary fill alone owns the clipped gradient bounds.
+                        if role ~= 3 then
+                            local frame = role == 2 and outline or fill
+                            frame[key] = udim2_new(0, value.X, 0, value.Y)
+                        end
+                        if key == "Size" then refresh_visibility() end
+                    elseif key == "Visible" then
+                        refresh_visibility()
+                    end
+                end
+            })
+        end
+        refresh_colors()
+        refresh_opacity()
+        live_bar_states[state] = true
+        return proxies[1], proxies[2], proxies[3]
+    end)
+
+    -- Menu setters. kind is 4 for health bars and 10 for armor bars.
+    local set_live_bar_repeats = LPH_NO_VIRTUALIZE(function(kind, repeats)
+        repeats = clamp(floor(repeats + 0.5), 1, 8)
+        if live_bar_settings[kind].repeats == repeats then return end
+        live_bar_settings[kind].repeats = repeats
+        for state in pairs(live_bar_states) do
+            if state.kind == kind then state.build_slices() end
+        end
+    end)
+
+    local set_live_bar_blend = LPH_NO_VIRTUALIZE(function(kind, blend)
+        live_bar_settings[kind].blend = clamp(blend, 0, 1)
+        for state in pairs(live_bar_states) do
+            if state.kind == kind then
+                state.refresh_colors()
+                state.refresh_opacity()
+            end
+        end
+    end)
+
 
     local create_health_bar = LPH_NO_VIRTUALIZE(function(data)
         local rendering = data[6]
@@ -18542,6 +18749,11 @@ end
 
         local colors = colors[status]
         local transparencies = transparencies[status]
+
+        if do_health_bar_gradient then
+            drawings[4], drawings[5], drawings[6] = create_live_bar(colors, transparencies, 4, rendering)
+            return
+        end
 
         drawings[4] = create_esp_drawing("Square", {
             Color = colors[4],
@@ -18559,16 +18771,6 @@ end
             Transparency = transparencies[5],
             Visible = rendering
         })
-
-        if do_health_bar_gradient then
-            drawings[6] = create_esp_drawing("Image", {
-                Color = colors[6],
-                Transparency = transparencies[6],
-                ZIndex = 4,
-                Data = bar_half_gradient_data,
-                Visible = rendering
-            })
-        end
     end)
 
     local update_health_bar = LPH_NO_VIRTUALIZE(function(data, new_health, difference)
@@ -18594,6 +18796,11 @@ end
         local colors = colors[status]
         local transparencies = transparencies[status]
 
+        if do_armor_bar_gradient then
+            drawings[10], drawings[11], drawings[12] = create_live_bar(colors, transparencies, 10, rendering)
+            return
+        end
+
         drawings[10] = create_esp_drawing("Square", {
             Color = colors[10],
             Thickness = 1,
@@ -18614,20 +18821,6 @@ end
         if hide then
             drawings[10]["Size"] = zero_size
             drawings[11]["Size"] = zero_size
-        end
-
-        if do_armor_bar_gradient then
-            drawings[12] = create_esp_drawing("Image", {
-                Color = colors[12],
-                Transparency = transparencies[12],
-                ZIndex = 4,
-                Data = bar_half_gradient_data,
-                Visible = rendering
-            })
-
-            if hide then
-                drawings[12]["Size"] = zero_size
-            end
         end
     end)
 
@@ -20108,11 +20301,32 @@ end
             end
         end))
 
+        create_connection(menu_references["health_bar_live"]["on_toggle_change"], LPH_NO_VIRTUALIZE(function(value)
+            do_health_bar_live = value
+        end))
+
+        -- Live gradient tuning for both bars. Speed 100% = 2 cycles per
+        -- second, so the 25% default keeps the original 0.5 cycles per second.
+        for kind, prefix in pairs({[4] = "health_bar_live", [10] = "armor_bar_live"}) do
+            create_connection(menu_references[prefix.."_speed"]["on_slider_change"], LPH_NO_VIRTUALIZE(function(value)
+                live_bar_settings[kind].speed = value / 50
+            end))
+
+            create_connection(menu_references[prefix.."_direction"]["on_dropdown_change"], LPH_NO_VIRTUALIZE(function(value)
+                live_bar_settings[kind].direction = value[1] == "up" and -1 or 1
+            end))
+
+            create_connection(menu_references[prefix.."_repeats"]["on_slider_change"], LPH_NO_VIRTUALIZE(function(value)
+                set_live_bar_repeats(kind, value)
+            end))
+
+            create_connection(menu_references[prefix.."_blend"]["on_slider_change"], LPH_NO_VIRTUALIZE(function(value)
+                set_live_bar_blend(kind, value / 100)
+            end))
+        end
+
         create_connection(menu_references["health_bar_gradient"]["on_toggle_change"], LPH_NO_VIRTUALIZE(function(value)
             do_health_bar_gradient = value
-
-            menu_references["enemy_health_bar_gradient"]:set_visible(value)
-            menu_references["friendly_health_bar_gradient"]:set_visible(value)
 
             if do_health_bar and flags["esp"] then
                 for player, data in player_data do
@@ -20411,11 +20625,12 @@ end
             end
         end))
 
+        create_connection(menu_references["armor_bar_live"]["on_toggle_change"], LPH_NO_VIRTUALIZE(function(value)
+            do_armor_bar_live = value
+        end))
+
         create_connection(menu_references["armor_bar_gradient"]["on_toggle_change"], LPH_NO_VIRTUALIZE(function(value)
             do_armor_bar_gradient = value
-
-            menu_references["enemy_armor_bar_gradient"]:set_visible(value)
-            menu_references["friendly_armor_bar_gradient"]:set_visible(value)
 
             if do_armor_bar and flags["esp"] then
                 for player, data in player_data do
@@ -20601,9 +20816,7 @@ end
     -- >> ( color / transparency updaters )
 
     local statuses = {
-        [1] = "",
-        [2] = "friendly_",
-        [3] = "enemy_"
+        [1] = ""
     }
 
     for status, name in statuses do
@@ -20615,7 +20828,7 @@ end
             colors[1] = color
             if do_box then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local box = data[5][1]
 
                         if box then
@@ -20632,7 +20845,7 @@ end
 
             if do_box then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local box = data[5][1]
 
                         if box then
@@ -20647,7 +20860,7 @@ end
             colors[3] = color
             if do_name then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local name = data[5][3]
 
                         if name then
@@ -20664,7 +20877,7 @@ end
 
             if do_name then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local name = data[5][3]
 
                         if name then
@@ -20679,7 +20892,7 @@ end
             colors[4] = color
             if do_health_bar then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local health_bar = data[5][4]
 
                         if health_bar then
@@ -20696,7 +20909,7 @@ end
 
             if do_health_bar then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local health_bar = data[5][4]
 
                         if health_bar then
@@ -20711,7 +20924,7 @@ end
             colors[6] = color
             if do_health_bar and do_health_bar_gradient then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local health_bar_gradient = data[5][6]
 
                         if health_bar_gradient then
@@ -20728,7 +20941,7 @@ end
 
             if do_health_bar and do_health_bar_gradient then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local health_bar_gradient = data[5][6]
 
                         if health_bar_gradient then
@@ -20743,7 +20956,7 @@ end
             alt_information[5] = color
             if do_chams then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local chams = data[12]
 
                         if chams then
@@ -20761,7 +20974,7 @@ end
 
             if do_chams then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local chams = data[12]
 
                         if chams then
@@ -20778,7 +20991,7 @@ end
             alt_information[1] = color
             if do_highlight then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local highlight = data[8]
 
                         if highlight then
@@ -20794,7 +21007,7 @@ end
 
             if do_highlight then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local highlight = data[8]
 
                         if highlight then
@@ -20809,7 +21022,7 @@ end
             alt_information[3] = color
             if do_highlight then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local highlight = data[8]
 
                         if highlight then
@@ -20825,7 +21038,7 @@ end
 
             if do_highlight then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local highlight = data[8]
 
                         if highlight then
@@ -20840,7 +21053,7 @@ end
             colors[7] = color
             if do_health_text then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local health_text = data[5][7]
 
                         if health_text then
@@ -20857,7 +21070,7 @@ end
 
             if do_health_text then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local health_text = data[5][7]
 
                         if health_text then
@@ -20872,7 +21085,7 @@ end
             colors[8] = color
             if do_tool_text then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local tool_text = data[5][8]
 
                         if tool_text then
@@ -20889,7 +21102,7 @@ end
 
             if do_tool_text then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local tool_text = data[5][8]
 
                         if tool_text then
@@ -20904,7 +21117,7 @@ end
             colors[9] = color
             if do_tool_icon then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local tool_icon = data[5][9]
 
                         if tool_icon then
@@ -20921,7 +21134,7 @@ end
 
             if do_tool_icon then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local tool_icon = data[5][9]
 
                         if tool_icon then
@@ -20936,7 +21149,7 @@ end
             colors[10] = color
             if do_armor_bar then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local armor_bar = data[5][10]
 
                         if armor_bar then
@@ -20953,7 +21166,7 @@ end
 
             if do_armor_bar then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local armor_bar = data[5][10]
 
                         if armor_bar then
@@ -20968,7 +21181,7 @@ end
             colors[12] = color
             if do_armor_bar and do_armor_bar_gradient then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local armor_bar_gradient = data[5][12]
 
                         if armor_bar_gradient then
@@ -20985,7 +21198,7 @@ end
 
             if do_armor_bar and do_armor_bar_gradient then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local armor_bar_gradient = data[5][12]
 
                         if armor_bar_gradient then
@@ -21000,7 +21213,7 @@ end
             colors[13] = color
             if do_image then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local image = data[5][13]
 
                         if image then
@@ -21017,7 +21230,7 @@ end
 
             if do_image then
                 for player, data in player_data do
-                    if data[1] == status then
+                    do
                         local image = data[5][13]
 
                         if image then
@@ -21033,7 +21246,7 @@ end
 
             if do_material then
                 for player, data in player_data do
-                    if data[1] == status and data[3] then
+                    if data[3] then
                         spawn(apply_material, data)
                     end
                 end
@@ -21045,7 +21258,7 @@ end
 
             if do_material then
                 for player, data in player_data do
-                    if data[1] == status and data[3] then
+                    if data[3] then
                         spawn(apply_material, data)
                     end
                 end
