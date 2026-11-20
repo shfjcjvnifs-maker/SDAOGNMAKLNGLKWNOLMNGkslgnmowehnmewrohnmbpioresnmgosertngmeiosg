@@ -29729,40 +29729,135 @@ do
     local avatar = nil
 
     -- Luashield (https://luashield-vjts.onrender.com) hands the loader the Discord
-    -- id of the key that ran the script: handshake vars.DiscordID, published as
-    -- SEC_DiscordID. The service keeps no display name and no avatar, so those are
-    -- still resolved from that id through a Discord lookup.
+    -- snapshot of the key that ran the script: handshake user { Id, Username,
+    -- DisplayName, Avatar }, published as SEC_Discord*. Older loaders carry only
+    -- the id (handshake vars.DiscordID / SEC_DiscordID) with no name or avatar, so
+    -- those still resolve through a lookup keyed on that id.
     local discord_id = nil
+    local discord_username = ""
+    local discord_display = ""
+    local discord_avatar = ""
+
+    local function read_global(name)
+        local env = getgenv() or _G
+        local value = env and env[name]
+
+        if value == nil then
+            value = _G[name]
+        end
+
+        return value
+    end
+
+    local function clean(value)
+        if type(value) ~= "string" then
+            return ""
+        end
+
+        value = value:gsub("%c", "")
+        value = value:match("^%s*(.-)%s*$") or ""
+
+        return #value > 64 and value:sub(1, 64) or value
+    end
+
+    local function is_snowflake(value)
+        if typeof(value) ~= "string" or #value < 17 or #value > 20 then
+            return false
+        end
+
+        return value:match("^%d+$") ~= nil
+    end
+
+    local function http_get(url, headers)
+        local senders = {}
+
+        if type(request) == "function" then
+            senders[#senders + 1] = request
+        end
+
+        if type(http_request) == "function" then
+            senders[#senders + 1] = http_request
+        end
+
+        if type(syn) == "table" and type(syn.request) == "function" then
+            senders[#senders + 1] = syn.request
+        end
+
+        for index = 1, #senders do
+            local sender = senders[index]
+            local ok, body = pcall(sender, {
+                ["Url"] = url,
+                ["Method"] = "GET",
+                ["Headers"] = headers
+            })
+
+            if ok and type(body) == "table" then
+                local status = body["StatusCode"] or body["status"]
+                local content = body["Body"] or body["body"]
+
+                if (status == nil or status == 200) and type(content) == "string" then
+                    return content
+                end
+            end
+        end
+
+        local ok, body = pcall(function()
+            return game:HttpGet(url)
+        end)
+
+        if ok and type(body) == "string" and #body > 0 then
+            return body
+        end
+
+        return nil
+    end
+
+    -- No custom avatar: index = (snowflake >> 22) % 6. Done on the decimal string
+    -- so a 17-20 digit id never loses bits to float precision.
+    local function default_avatar(id)
+        local remainder = 0
+
+        for i = 1, #id do
+            remainder = (remainder * 10 + tonumber(id:sub(i, i))) % 25165824
+        end
+
+        return ("https://cdn.discordapp.com/embed/avatars/%d.png"):format(floor(remainder / 4194304))
+    end
 
     do
-        local env = getgenv() or _G
-        local candidates = {
-            env and env["SEC_DiscordID"],
-            _G["SEC_DiscordID"],
-            env and env["LRM_LinkedDiscordID"],
-            _G["LRM_LinkedDiscordID"]
-        }
+        local names = { "SEC_DiscordID", "LRM_LinkedDiscordID" }
 
-        for _, value in candidates do
-            if typeof(value) == "string" and value:match("^[0-9]{17,20}$") then
+        for index = 1, #names do
+            local value = read_global(names[index])
+
+            if is_snowflake(value) then
                 discord_id = value
                 break
             end
         end
+
+        discord_username = clean(read_global("SEC_DiscordUsername"))
+        discord_display = clean(read_global("SEC_DiscordDisplayName"))
+
+        local published_avatar = read_global("SEC_DiscordAvatar")
+
+        if type(published_avatar) == "string" and published_avatar:match("^https://") then
+            discord_avatar = published_avatar
+        end
     end
 
-    -- The loader is not the only way in. The same id answers on the public
-    -- handshake for anyone running the file with a licence key set.
-    if not discord_id then
+    -- The loader is not the only way in. The same snapshot answers on the public
+    -- handshake for anyone running the file with a licence key set, so pull it
+    -- whenever the sealed globals left a name or an avatar missing.
+    if discord_username == "" or discord_avatar == "" then
         local key = nil
-        local env = getgenv()
 
         pcall(function()
             key = script_key
         end)
 
-        if type(key) ~= "string" and env then
-            key = env["script_key"]
+        if type(key) ~= "string" or #key == 0 then
+            key = read_global("script_key")
         end
 
         if type(key) == "string" and #key > 0 then
@@ -29776,34 +29871,59 @@ do
                 end
             end)
 
-            local ok, result = pcall(function()
-                local body = request({
-                    ["Url"] = "https://luashield-vjts.onrender.com/api/v1/handshake?key="..key.."&hwid="..tostring(hwid).."&script=pjxSE16vW44&name=juju.beta",
-                    ["Method"] = "GET"
-                })
+            local body = http_get(
+                "https://luashield-vjts.onrender.com/api/v1/handshake?key="..http_service:UrlEncode(key)
+                    .."&hwid="..http_service:UrlEncode(tostring(hwid))
+                    .."&script=pjxSE16vW44&name=juju.beta"
+            )
 
-                if body and body["StatusCode"] == 200 then
-                    return http_service:JSONDecode(body["Body"])
-                end
+            local ok, result = pcall(function()
+                return body and http_service:JSONDecode(body) or nil
             end)
 
             if ok and type(result) == "table" and result["ok"] then
-                local vars = result["vars"]
-                local id = vars and vars["DiscordID"]
+                local user = result["user"]
 
-                if typeof(id) == "string" and id:match("^[0-9]{17,20}$") then
-                    discord_id = id
+                if type(user) == "table" then
+                    local id = user["Id"]
+
+                    if is_snowflake(id) then
+                        discord_id = id
+                    end
+
+                    if discord_username == "" then
+                        discord_username = clean(user["Username"])
+                    end
+
+                    if discord_display == "" then
+                        discord_display = clean(user["DisplayName"])
+                    end
+
+                    local link = user["Avatar"]
+
+                    if discord_avatar == "" and type(link) == "string" and link:match("^https://") then
+                        discord_avatar = link
+                    end
+                end
+
+                if not discord_id then
+                    local vars = result["vars"]
+                    local id = vars and vars["DiscordID"]
+
+                    if is_snowflake(id) then
+                        discord_id = id
+                    end
                 end
             end
         end
     end
 
-    if discord_id then
+    -- Id-only loaders: the handle and avatar still come from a lookup on that id.
+    if discord_id and (discord_avatar == "" or discord_username == "") then
         local ok, data = pcall(function()
-            local body = request({
-                ["Url"] = "https://discord-lookup-api-pied.vercel.app/v1/user/"..discord_id,
-                ["Method"] = "GET",
-                ["Headers"] = {
+            local body = http_get(
+                "https://discord-lookup-api-pied.vercel.app/v1/user/"..discord_id,
+                {
                     ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     ["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
                     ["Accept-Language"] = "en-US,en;q=0.9",
@@ -29812,29 +29932,53 @@ do
                     ["DNT"] = "1",
                     ["Upgrade-Insecure-Requests"] = "1"
                 }
-            })
+            )
 
-            if body and body["StatusCode"] == 200 then
-                return http_service:JSONDecode(body["Body"])
+            if type(body) == "string" then
+                return http_service:JSONDecode(body)
             end
         end)
 
         if ok and type(data) == "table" then
-            if type(data["username"]) == "string" then
-                username = "@"..data["username"]
+            if discord_username == "" and type(data["username"]) == "string" then
+                discord_username = clean(data["username"])
             end
 
             local link = data["avatar"] and data["avatar"]["link"]
 
-            if type(link) == "string" then
-                local ok_avatar, image = pcall(function()
-                    return game:HttpGet(link)
-                end)
-
-                if ok_avatar then
-                    avatar = image
-                end
+            if discord_avatar == "" and type(link) == "string" and link:match("^https://") then
+                discord_avatar = link
             end
+        end
+    end
+
+    -- No custom avatar anywhere: deterministic embed avatar derived from the id.
+    if discord_avatar == "" and discord_id then
+        discord_avatar = default_avatar(discord_id)
+    end
+
+    -- Avatar bytes for the notification icon. Only real image data is passed on,
+    -- so a failed download never ends up as the notification image.
+    if discord_avatar ~= "" then
+        local bytes = http_get(discord_avatar)
+
+        if type(bytes) == "string" and (bytes:sub(1, 4) == "\137PNG" or bytes:sub(1, 3) == "GIF") then
+            avatar = bytes
+        end
+    end
+
+    -- Display name wins, with the handle kept alongside when both exist.
+    do
+        local shown = discord_display ~= "" and discord_display or discord_username
+
+        if shown ~= "" then
+            if discord_display ~= "" and discord_username ~= "" and discord_username ~= discord_display then
+                shown = shown.." (@"..discord_username..")"
+            elseif discord_display == "" then
+                shown = "@"..shown
+            end
+
+            username = shown
         end
     end
 
