@@ -10004,30 +10004,38 @@ do
         local didnt_buy = local_bought_count ~= new_bought_count
         local ping = local_ping/1000
         local skip = purchasing and purchasing[6]:find("armor") or not purchasing
-        
-        if not stop and (didnt_buy and hrp and clock() - start_time < (local_reloading and 2 + ping * 2 or ping*2 + purchase_count*0.36) and (not is_ammo or not local_reloading)) then
-            if not skip then
-                local backpack = find_first_child(local_player, "Backpack")
 
-                for gun, data in local_guns do
-                    local gun = gun["Parent"]
+        -- An ammo buy fired into an active reload is rejected by the server, so
+        -- the click is held until the reload ends. This only defers the click;
+        -- it must not end the attempt. Folding it into the window check below
+        -- made an ammo buy during a reload give up instead of waiting it out.
+        local wait_for_reload = is_ammo and local_reloading
 
-                    if backpack and gun and gun["Parent"] == local_character then
-                        setscriptable(gun, "Parent", true)
-                        gun["Parent"] = backpack
+        if not stop and didnt_buy and hrp and clock() - start_time < (local_reloading and 2 + ping * 2 or ping*2 + purchase_count*0.36) then
+            if not wait_for_reload then
+                if not skip then
+                    local backpack = find_first_child(local_player, "Backpack")
+
+                    for gun, data in local_guns do
+                        local gun = gun["Parent"]
+
+                        if backpack and gun and gun["Parent"] == local_character then
+                            setscriptable(gun, "Parent", true)
+                            gun["Parent"] = backpack
+                        end
                     end
                 end
+
+                fireclickdetector(detector)
+                local old_cframe = hrp["CFrame"]
+
+                if not in_void then
+                    hrp["CFrame"] = cframe_new(position - vector3_new(0,8.8,0))
+                end
+
+                render_stepped_wait(render_stepped)
+                hrp["CFrame"] = old_cframe
             end
-
-            fireclickdetector(detector)
-            local old_cframe = hrp["CFrame"]
-
-            if not in_void then
-                hrp["CFrame"] = cframe_new(position - vector3_new(0,8.8,0))
-            end
-
-            render_stepped_wait(render_stepped)
-            hrp["CFrame"] = old_cframe
         else
             local old_purchasing = purchasing
 
@@ -26238,7 +26246,11 @@ local backtrack_data = {}
             local following_target = flags["follow_target"] and ragebot_target ~= nil and not ragebot_target[7] and (follow_target_follows_knocked or not ragebot_target[18])
             local disabled = (void_hide_disable_when_target_selected and ragebot_target) or (void_hide_disable_when_target_knocked and (flags["ragebot"] and ragebot_target and ragebot_target[18])) or (void_hide_disable_when_following_target and following_target)
 
-            if purchasing or (forced and flags["void_hide_stop_if_forced"]) or (disabled and not forced) then
+            -- "stop if forced" is an exploit-only toggle (shown only in exploit
+            -- mode); gating it on the exploit flag keeps a leftover value from
+            -- silently cancelling "force when" in normal mode, where a reload
+            -- would otherwise stand the void down and never bring it back.
+            if purchasing or (forced and flags["void_hide_exploit"] and flags["void_hide_stop_if_forced"]) or (disabled and not forced) then
                 -- This frame is not in the void, and a stale "in the void" is
                 -- read by the panel and by the stomp.
                 in_void = false
