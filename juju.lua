@@ -22201,7 +22201,18 @@ local backtrack_data = {}
         menu_references["rapid_fire"] = menu_references["utility_section"]:create_element({["name"] = "rapid fire"}, {["toggle"] = {["flag"] = "rapid_fire", ["default"] = false}})
         menu_references["rapid_fire_settings"] = menu_references["rapid_fire"]:create_settings()
         menu_references["rapid_fire_rate"] = menu_references["rapid_fire_settings"]:create_element({["name"] = "rate"}, {["slider"] = {["flag"] = "rapid_fire_rate", ["min"] = 1, ["max"] = 100, ["default"] = 80, ["suffix"] = "/s"}})
-        menu_references["rapid_fire_visual"] = menu_references["rapid_fire_settings"]:create_element({["name"] = "visual"}, {["toggle"] = {["flag"] = "rapid_fire_visual", ["default"] = true}})
+        menu_references["aug_aura"] = menu_references["utility_section"]:create_element({["name"] = "aug aura"}, {["toggle"] = {["flag"] = "aug_aura", ["default"] = false}})
+        menu_references["aug_aura_settings"] = menu_references["aug_aura"]:create_settings()
+        menu_references["aug_aura_auto_fire"] = menu_references["aug_aura_settings"]:create_element({["name"] = "auto fire"}, {["toggle"] = {["flag"] = "aug_aura_auto_fire", ["default"] = false}})
+        menu_references["aug_aura_range"] = menu_references["aug_aura_settings"]:create_element({["name"] = "range"}, {["slider"] = {["flag"] = "aug_aura_range", ["min"] = 10, ["max"] = 600, ["suffix"] = " studs", ["default"] = 250}})
+        menu_references["aug_aura_max_targets"] = menu_references["aug_aura_settings"]:create_element({["name"] = "max targets"}, {["slider"] = {["flag"] = "aug_aura_max_targets", ["min"] = 1, ["max"] = 12, ["suffix"] = "", ["default"] = 4}})
+        menu_references["aug_aura_cooldown"] = menu_references["aug_aura_settings"]:create_element({["name"] = "cooldown"}, {["slider"] = {["flag"] = "aug_aura_cooldown", ["min"] = 0, ["max"] = 500, ["suffix"] = "ms", ["default"] = 100}})
+        menu_references["aug_aura_mode"] = menu_references["aug_aura_settings"]:create_element({["name"] = "mode"}, {["dropdown"] = {["flag"] = "aug_aura_mode", ["options"] = {"burst", "rotate"}, ["default"] = {"burst"}, ["requires_one"] = true}})
+        menu_references["aug_aura_hitbox"] = menu_references["aug_aura_settings"]:create_element({["name"] = "hitbox"}, {["dropdown"] = {["flag"] = "aug_aura_hitbox", ["options"] = {"head", "torso"}, ["default"] = {"head"}, ["requires_one"] = true}})
+        menu_references["aug_aura_ignore_knocked"] = menu_references["aug_aura_settings"]:create_element({["name"] = "ignore knocked"}, {["toggle"] = {["flag"] = "aug_aura_ignore_knocked", ["default"] = true}})
+        menu_references["aug_aura_ignore_forcefield"] = menu_references["aug_aura_settings"]:create_element({["name"] = "ignore forcefield"}, {["toggle"] = {["flag"] = "aug_aura_ignore_forcefield", ["default"] = true}})
+        menu_references["aug_aura_friends"] = menu_references["aug_aura_settings"]:create_element({["name"] = "include friends"}, {["toggle"] = {["flag"] = "aug_aura_friends", ["default"] = false}})
+        menu_references["aug_aura_manipulation"] = menu_references["aug_aura_settings"]:create_element({["name"] = "use manipulation"}, {["toggle"] = {["flag"] = "aug_aura_manipulation", ["default"] = false}})
         --[[
         menu_references["control"] = menu_references["utility_section"]:create_element({["name"] = "control"}, {["toggle"] = {["flag"] = "control", ["default"] = false}})
         menu_references["control_settings"] = menu_references["control"]:create_settings()
@@ -24677,7 +24688,6 @@ local backtrack_data = {}
         local active = false
         local next_fire = 0
         local interval = 1 / 80
-        local do_visual = flags["rapid_fire_visual"] ~= false
 
         local raycast_params = RaycastParams["new"]()
         raycast_params["FilterType"] = Enum["RaycastFilterType"]["Exclude"]
@@ -24746,7 +24756,8 @@ local backtrack_data = {}
 
             next_fire = now + interval
 
-            if do_visual and shoot and data then
+            -- The beam is always drawn: visual is not optional.
+            if shoot and data then
                 setthreadidentity(8)
                 pcall(function()
                     local env = getfenv(shoot)
@@ -24801,9 +24812,6 @@ local backtrack_data = {}
         update_interval(flags["rapid_fire_rate"])
 
         create_connection(menu_references["rapid_fire_rate"]["on_slider_change"], update_interval)
-        create_connection(menu_references["rapid_fire_visual"]["on_toggle_change"], function(value)
-            do_visual = value
-        end)
 
         create_connection(menu_references["rapid_fire"]["on_toggle_change"], LPH_JIT_MAX(function(value)
             if value then
@@ -24814,6 +24822,205 @@ local backtrack_data = {}
         end))
 
         if flags["rapid_fire"] then
+            start()
+        end
+    end
+
+    -- >> ( aug aura: shoots every target around you, no aiming )
+
+    do
+        local aug_aura = {
+            ["last"] = 0,
+            ["index"] = 0,
+            ["busy"] = false
+        }
+
+        aug_aura["fire"] = LPH_NO_VIRTUALIZE(function(gun, base, entry)
+            local handle = gun[1]
+            local data = entry["Data"]
+            local part = entry["Part"]
+
+            if not handle or not handle["Parent"] or not part or not part["Parent"] then
+                return
+            end
+
+            -- The limb is shot where it is. No velocity lead: the game stopped
+            -- predicting movement, so a predicted point is a point the server
+            -- never sees and the shot misses behind the target.
+            local pos = part["Position"]
+            -- The packet leaves from the muzzle, the same origin rapid fire and the
+            -- ragebot send. The solve takes the raw server position: it adds the
+            -- muzzle offset itself when it has to move the origin.
+            local origin = base + vector3_new(0.004, 3.0208, -0.048)
+            local hit_part = part
+
+            if flags["aug_aura_manipulation"] then
+                local manip = manipulation["solve"](data, part, pos, base)
+
+                if manip then
+                    pos = manip["position"]
+                    origin = manip["origin"] or origin
+                    hit_part = manip["part"] or hit_part
+                end
+            end
+
+            -- The beam is always drawn, the same way rapid fire draws it.
+            if shoot then
+                setthreadidentity(8)
+                pcall(function()
+                    local env = getfenv(shoot)
+                    env["require"] = require
+                    shoot({
+                        Shooter = local_character,
+                        Handle = handle,
+                        ForcedOrigin = origin,
+                        AimPosition = pos,
+                        BeamColor = color3_fromrgb(1, 0.545098, 0.14902),
+                        Range = tonumber(gun[2]) or 1000
+                    })
+                    env["require"] = nil
+                end)
+                setthreadidentity(4)
+            end
+
+            local direction = pos - origin
+
+            if direction["Magnitude"] <= 0.001 then
+                return
+            end
+
+            direction = direction["Unit"]
+
+            setthreadidentity(8)
+            pcall(function()
+                event:FireServer("ShootGun", handle, origin, pos, hit_part, direction)
+            end)
+            setthreadidentity(4)
+        end)
+
+        aug_aura["step"] = LPH_NO_VIRTUALIZE(function()
+            if not flags["aug_aura"] or local_reloading or not local_character then
+                return
+            end
+
+            -- Manual by default: the aura fires while the mouse is held, and only
+            -- on its own when auto fire is on.
+            if not flags["aug_aura_auto_fire"] and (menu["is_menu_open"]() or not user_input_service["IsMouseButtonPressed"](user_input_service, Enum["UserInputType"]["MouseButton1"])) then
+                return
+            end
+
+            local now = clock()
+
+            if aug_aura["busy"] or now - aug_aura["last"] < flags["aug_aura_cooldown"] / 1000 then
+                return
+            end
+
+            -- Equipped AUG with ammo left.
+            local gun = nil
+
+            for _, entry in local_guns do
+                local tool = entry[5]
+                local ammo = tonumber(entry[3])
+
+                if tool and tool["Parent"] == local_character and tool["Name"] == "[AUG]" and (ammo == nil or ammo > 0) and entry[1] and entry[1]["Parent"] then
+                    gun = entry
+                    break
+                end
+            end
+
+            if not gun then
+                return
+            end
+
+            local base = local_server_position["p"]
+            local range = math["min"](flags["aug_aura_range"], tonumber(gun[2]) or 9e9)
+            local hitbox = flags["aug_aura_hitbox"]
+            local part_name = hitbox and hitbox[1] == "torso" and "UpperTorso" or "Head"
+            local list = {}
+
+            for player, data in player_data do
+                local parts = data[4]
+                local root = parts["HumanoidRootPart"]
+                local part = parts[part_name] or root
+
+                if player ~= local_player and part and root and not data[7] and (not data[18] or not flags["aug_aura_ignore_knocked"]) and (data[1] ~= 2 or flags["aug_aura_friends"]) and (not flags["aug_aura_ignore_forcefield"] or not spawn_guard["check"](data)) then
+                    local magnitude = (root["Position"] - base)["Magnitude"]
+
+                    if magnitude <= range then
+                        list[#list+1] = {["Data"] = data, ["Part"] = part, ["Root"] = root, ["Magnitude"] = magnitude}
+                    end
+                end
+            end
+
+            if #list == 0 then
+                return
+            end
+
+            table["sort"](list, function(a, b)
+                return a["Magnitude"] < b["Magnitude"]
+            end)
+
+            aug_aura["last"] = now
+            aug_aura["busy"] = true
+
+            -- A throw must not leave the guard set, or the aura would never fire
+            -- again.
+            pcall(function()
+                local mode = flags["aug_aura_mode"]
+
+                if mode and mode[1] == "rotate" then
+                    aug_aura["index"] = aug_aura["index"] % #list + 1
+                    aug_aura["fire"](gun, base, list[aug_aura["index"]])
+                    return
+                end
+
+                local max_targets = flags["aug_aura_max_targets"] or 1
+                local ammo = tonumber(gun[3])
+                local shots = math["min"](#list, max_targets, ammo or max_targets)
+
+                for index = 1, shots do
+                    aug_aura["fire"](gun, base, list[index])
+                end
+            end)
+
+            aug_aura["busy"] = false
+        end)
+
+        local active = false
+
+        local start = function()
+            if active then
+                return
+            end
+
+            active = true
+            heartbeat[#heartbeat+1] = aug_aura["step"]
+        end
+
+        local stop = function()
+            if not active then
+                return
+            end
+
+            active = false
+
+            for i = 1, #heartbeat do
+                if heartbeat[i] == aug_aura["step"] then
+                    table.remove(heartbeat, i)
+                    break
+                end
+            end
+        end
+
+        create_connection(menu_references["aug_aura"]["on_toggle_change"], LPH_JIT_MAX(function(value)
+            if value then
+                start()
+            else
+                stop()
+            end
+        end))
+
+        if flags["aug_aura"] then
             start()
         end
     end
