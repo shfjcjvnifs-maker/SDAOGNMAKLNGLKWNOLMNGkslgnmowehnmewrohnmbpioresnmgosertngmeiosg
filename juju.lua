@@ -8711,6 +8711,29 @@ end
 
 local get_bullet_result = nil
 local purchase_item = nil
+
+-- How many of an item cash covers, capped at what was asked for. Auto buy
+-- used to walk to the shop for a batch it could not pay for, fail at the
+-- counter, and try again on the next frame. A wanted count of 0 or less is
+-- one, the same as a plain item purchase.
+local affordable_count = function(cash, price, wanted)
+    if not cash or not price or price <= 0 then
+        return 0
+    end
+
+    if not wanted or wanted < 1 then
+        wanted = 1
+    end
+
+    local can = floor(cash / price)
+
+    if can < wanted then
+        return can
+    end
+
+    return wanted
+end
+-- end affordable_count
 local force_aim_position = nil
 
 -- > ( client stuff )
@@ -14878,6 +14901,9 @@ end
         menu_references["hit_sound_settings"] = menu_references["hit_sound"]:create_settings()
         menu_references["hit_sound_value"] = menu_references["hit_sound_settings"]:create_element({["name"] = "sound"}, {["dropdown"] = {["flag"] = "hit_sound_value", ["default"] = {"mc bow"}, ["options"] = {"primordial", "neverlose", "sparkle", "mc bow", "skeet", "break", "rust"}, ["requires_one"] = true, ["use_custom_extensions"] = {"mp3", "ogg", "wav"}}})
         menu_references["hit_sound_volume"] = menu_references["hit_sound_settings"]:create_element({["name"] = "volume"}, {["slider"] = {["flag"] = "hit_sound_volume", ["min"] = 0.1, ["max"] = 5, ["default"] = 1, ["decimals"] = 1}})
+    menu_references["hit_effects"] = menu_references["game_section"]:create_element({["name"] = "hit effect limits"}, {}):create_settings()
+        menu_references["hit_effects_max"] = menu_references["hit_effects"]:create_element({["name"] = "max per effect"}, {["slider"] = {["flag"] = "hit_effects_max", ["min"] = 1, ["max"] = 20, ["default"] = 6, ["suffix"] = "", ["prefix"] = ""}})
+        menu_references["hit_effects_gap"] = menu_references["hit_effects"]:create_element({["name"] = "min gap per target"}, {["slider"] = {["flag"] = "hit_effects_gap", ["min"] = 0, ["max"] = 500, ["default"] = 60, ["suffix"] = "ms", ["prefix"] = "", ["min_text"] = "off"}})
 
     -- >> ( local bullet tracers )
 
@@ -15362,6 +15388,87 @@ end
         end)
     end
 
+    -- >> ( hit effect limits )
+
+    -- Every hit effect builds drawings, clones or heartbeat closures, and a
+    -- burst of hits stacked dozens of them at once. Each effect gets its own
+    -- limiter: allow(target) skips an effect on a target hit again within
+    -- interval seconds, and track(cleanup) keeps at most cap effects alive,
+    -- retiring the oldest first. track returns finish, which runs cleanup at
+    -- most once however many times it is called (cap retire or own timer).
+    local new_hit_effect_limiter = LPH_NO_VIRTUALIZE(function(cap, interval)
+        local limiter = {cap = cap, interval = interval}
+        local last_shown = setmetatable({}, {["__mode"] = "k"})
+        local live = {}
+
+        limiter.allow = function(target)
+            local now = clock()
+            local last = last_shown[target]
+
+            if last and now - last < limiter.interval then
+                return false
+            end
+
+            last_shown[target] = now
+            return true
+        end
+
+        limiter.track = function(cleanup)
+            local entry = {cleanup}
+
+            entry[2] = function()
+                local run = entry[1]
+
+                if run == nil then
+                    return
+                end
+
+                entry[1] = nil
+
+                for i = 1, #live do
+                    if live[i] == entry then
+                        table.remove(live, i)
+                        break
+                    end
+                end
+
+                run()
+            end
+
+            live[#live + 1] = entry
+
+            while #live > limiter.cap do
+                live[1][2]()
+            end
+
+            return entry[2]
+        end
+
+        return limiter
+    end)
+
+    -- >> ( hit effect limit wiring )
+
+    local hit_effect_limiters = {}
+
+    local hit_effect_limiter = function()
+        local limiter = new_hit_effect_limiter(flags["hit_effects_max"] or 6, (flags["hit_effects_gap"] or 60) / 1000)
+        hit_effect_limiters[#hit_effect_limiters + 1] = limiter
+        return limiter
+    end
+
+    create_connection(menu_references["hit_effects_max"]["on_slider_change"], function(value)
+        for i = 1, #hit_effect_limiters do
+            hit_effect_limiters[i].cap = value
+        end
+    end)
+
+    create_connection(menu_references["hit_effects_gap"]["on_slider_change"], function(value)
+        for i = 1, #hit_effect_limiters do
+            hit_effect_limiters[i].interval = value / 1000
+        end
+    end)
+
     -- >> ( hit skeleton )
 
     do
@@ -15382,357 +15489,189 @@ end
             })
         end
 
+        -- Joints are captured once, at the hit, in world space. Each bone is
+        -- {from, to}; a bone is drawn only while its parent joint is on screen,
+        -- the same chain rule the hand-written segments used.
+        local hit_skeleton_bones = {
+            {"head", "neck"},
+            {"neck", "left_shoulder"},
+            {"neck", "right_shoulder"},
+            {"left_shoulder", "left_upper_arm"},
+            {"right_shoulder", "right_upper_arm"},
+            {"left_upper_arm", "left_lower_arm"},
+            {"right_upper_arm", "right_lower_arm"},
+            {"left_lower_arm", "left_hand"},
+            {"right_lower_arm", "right_hand"},
+            {"neck", "lower_torso"},
+            {"lower_torso", "left_upper_leg"},
+            {"lower_torso", "right_upper_leg"},
+            {"left_upper_leg", "left_lower_leg"},
+            {"right_upper_leg", "right_lower_leg"},
+            {"left_lower_leg", "left_foot"},
+            {"right_lower_leg", "right_foot"}
+        }
+
+        local hit_skeleton_joints = LPH_NO_VIRTUALIZE(function(parts)
+            local joints = {}
+            local function cframe_of(name)
+                local part = parts[name]
+                return part and part.CFrame
+            end
+
+            local head = cframe_of("Head")
+            if head then
+                joints.head = head.Position
+                joints.neck = head.Position - head.YVector / 1.3
+            end
+
+            local left_upper_arm = cframe_of("LeftUpperArm")
+            if left_upper_arm then
+                joints.left_shoulder = left_upper_arm.Position + left_upper_arm.YVector / 2
+                joints.left_upper_arm = left_upper_arm.Position - left_upper_arm.UpVector / 2 - left_upper_arm.XVector / 3
+            end
+
+            local right_upper_arm = cframe_of("RightUpperArm")
+            if right_upper_arm then
+                joints.right_shoulder = right_upper_arm.Position + right_upper_arm.YVector / 2
+                joints.right_upper_arm = right_upper_arm.Position - right_upper_arm.UpVector / 2 + right_upper_arm.XVector / 3
+            end
+
+            local left_lower_arm = cframe_of("LeftLowerArm")
+            if left_lower_arm then
+                joints.left_lower_arm = left_lower_arm.Position - left_lower_arm.UpVector / 2 - left_lower_arm.XVector / 4
+            end
+
+            local right_lower_arm = cframe_of("RightLowerArm")
+            if right_lower_arm then
+                joints.right_lower_arm = right_lower_arm.Position - right_lower_arm.UpVector / 2 + right_lower_arm.XVector / 4
+            end
+
+            for name, joint in pairs({
+                LeftHand = "left_hand", RightHand = "right_hand", LowerTorso = "lower_torso",
+                LeftFoot = "left_foot", RightFoot = "right_foot"
+            }) do
+                local cframe = cframe_of(name)
+                if cframe then
+                    joints[joint] = cframe.Position
+                end
+            end
+
+            for name, joint in pairs({
+                LeftUpperLeg = "left_upper_leg", RightUpperLeg = "right_upper_leg",
+                LeftLowerLeg = "left_lower_leg", RightLowerLeg = "right_lower_leg"
+            }) do
+                local cframe = cframe_of(name)
+                if cframe then
+                    joints[joint] = cframe.Position + cframe.UpVector / 2
+                end
+            end
+
+            return joints
+        end)
+
+        local hit_skeleton_limiter = hit_effect_limiter()
+
         local do_hit_skeleton = LPH_NO_VIRTUALIZE(function(player)
             local data = player_data[player]
-            local character = data[3]
 
-            if not character then
+            if not data or not data[3] or not hit_skeleton_limiter.allow(player) then
                 return
             end
-            local parts = data[4]
 
-            local head_to_neck = hit_skeleton_create_line()
-            local neck_to_left_shoulder = hit_skeleton_create_line()
-            local neck_to_right_shoulder = hit_skeleton_create_line()
-            local left_shoulder_to_upper_arm = hit_skeleton_create_line()
-            local right_shoulder_to_upper_arm = hit_skeleton_create_line()
-            local left_upper_arm_to_lower_arm = hit_skeleton_create_line()
-            local right_upper_arm_to_lower_arm = hit_skeleton_create_line()
-            local left_lower_arm_to_hand = hit_skeleton_create_line()
-            local right_lower_arm_to_hand = hit_skeleton_create_line()
-            local neck_to_lower_torso = hit_skeleton_create_line()
-            local lower_torso_to_left_upper_leg = hit_skeleton_create_line()
-            local lower_torso_to_right_upper_leg = hit_skeleton_create_line()
-            local left_upper_leg_to_lower_leg = hit_skeleton_create_line()
-            local right_upper_leg_to_lower_leg = hit_skeleton_create_line()
-            local left_lower_leg_to_foot = hit_skeleton_create_line()
-            local right_lower_leg_to_foot = hit_skeleton_create_line()
+            local joints = hit_skeleton_joints(data[4])
+            local lines = {}
+            for i = 1, #hit_skeleton_bones do
+                lines[i] = hit_skeleton_create_line()
+            end
 
-            local head_cframe = nil
-            local left_upper_arm_cframe = nil
-            local right_upper_arm_cframe = nil
-            local left_lower_arm_cframe = nil
-            local right_lower_arm_cframe = nil
-            local left_hand_cframe = nil
-            local right_hand_cframe = nil
-            local lower_torso_cframe = nil
-            local left_upper_leg_cframe = nil
-            local right_upper_leg_cframe = nil
-            local left_lower_leg_cframe = nil
-            local right_lower_leg_cframe = nil
-            local left_foot_cframe = nil
-            local right_foot_cframe = nil
+            local base_transparency = hit_skeleton_transparency
+            local alive = true
+            local fade_elapsed = nil
+            local last_camera_cframe = nil
+            local last_viewport = nil
 
-            local head = parts.Head
-            local left_upper_arm = parts.LeftUpperArm
-            local right_upper_arm = parts.RightUpperArm
-            local left_lower_arm = parts.LeftLowerArm
-            local right_lower_arm = parts.RightLowerArm
-            local left_hand = parts.LeftHand
-            local right_hand = parts.RightHand
-            local lower_torso = parts.LowerTorso
-            local left_upper_leg = parts.LeftUpperLeg
-            local right_upper_leg = parts.RightUpperLeg
-            local left_lower_leg = parts.LeftLowerLeg
-            local right_lower_leg = parts.RightLowerLeg
-            local left_foot = parts.LeftFoot
-            local right_foot = parts.RightFoot
+            local draw = function(dt)
+                if not alive then
+                    return
+                end
 
-            if head then head_cframe = head.CFrame end
-            if left_upper_arm then left_upper_arm_cframe = left_upper_arm.CFrame end
-            if right_upper_arm then right_upper_arm_cframe = right_upper_arm.CFrame end
-            if left_lower_arm then left_lower_arm_cframe = left_lower_arm.CFrame end
-            if right_lower_arm then right_lower_arm_cframe = right_lower_arm.CFrame end
-            if left_hand then left_hand_cframe = left_hand.CFrame end
-            if right_hand then right_hand_cframe = right_hand.CFrame end
-            if lower_torso then lower_torso_cframe = lower_torso.CFrame end
-            if left_upper_leg then left_upper_leg_cframe = left_upper_leg.CFrame end
-            if right_upper_leg then right_upper_leg_cframe = right_upper_leg.CFrame end
-            if left_lower_leg then left_lower_leg_cframe = left_lower_leg.CFrame end
-            if right_lower_leg then right_lower_leg_cframe = right_lower_leg.CFrame end
-            if left_foot then left_foot_cframe = left_foot.CFrame end
-            if right_foot then right_foot_cframe = right_foot.CFrame end
-
-            local draw = function()
-                head_to_neck.Visible = false
-                local neck_position = nil
-                if head_cframe then
-                    local head_position, head_visible = world_to_viewport_point(camera, head_cframe.Position)
-
-                    local neck_3d = (head_cframe - head_cframe.YVector / 1.3).Position;
-                    local _neck_position, neck_visible = world_to_viewport_point(camera, neck_3d);
-
-                    if head_visible and neck_visible then
-                        head_to_neck.Visible = true
-                        head_to_neck.From = vector2_new(head_position.X, head_position.Y)
-                        neck_position = _neck_position
-                        neck_position = vector2_new(neck_position.X, neck_position.Y)
-                        head_to_neck.To = neck_position
+                -- One fade for all sixteen lines, run here instead of sixteen
+                -- separate tweens each with its own frame callback.
+                if fade_elapsed then
+                    fade_elapsed += dt
+                    local transparency = base_transparency * (1 - get_value(tween_service, clamp(fade_elapsed / 0.2, 0, 1), quad, out))
+                    for i = 1, #lines do
+                        lines[i].Transparency = transparency
                     end
                 end
 
-                neck_to_left_shoulder.Visible = false
-                local left_shoulder_position = nil
-                if neck_position and left_upper_arm_cframe then
-                    local _left_shoulder_position, left_shoulder_visible = world_to_viewport_point(camera, left_upper_arm_cframe.Position + left_upper_arm_cframe.YVector / 2)
+                -- The joints are frozen at the hit, so the projection only
+                -- changes when the camera does. A still camera costs nothing.
+                local camera_cframe = camera.CFrame
+                local viewport = camera.ViewportSize
+                if camera_cframe == last_camera_cframe and viewport == last_viewport then
+                    return
+                end
+                last_camera_cframe = camera_cframe
+                last_viewport = viewport
 
-                    if left_shoulder_visible then
-                        neck_to_left_shoulder.Visible = true
-                        neck_to_left_shoulder.From = neck_position
-                        left_shoulder_position = _left_shoulder_position
-                        left_shoulder_position = vector2_new(left_shoulder_position.X, left_shoulder_position.Y)
-                        neck_to_left_shoulder.To = left_shoulder_position
+                local screen = {}
+                local head = joints.head
+                if head then
+                    local position, visible = world_to_viewport_point(camera, head)
+                    if visible then
+                        screen.head = vector2_new(position.X, position.Y)
                     end
                 end
 
-                neck_to_right_shoulder.Visible = false
-                local right_shoulder_position = nil
-                if neck_position and right_upper_arm_cframe then
-                    local _right_shoulder_position, right_shoulder_visible = world_to_viewport_point(camera, right_upper_arm_cframe.Position + right_upper_arm_cframe.YVector / 2)
+                for i = 1, #hit_skeleton_bones do
+                    local bone = hit_skeleton_bones[i]
+                    local line = lines[i]
+                    local from = screen[bone[1]]
+                    local world = joints[bone[2]]
+                    local shown = false
 
-                    if right_shoulder_visible then
-                        neck_to_right_shoulder.Visible = true
-                        neck_to_right_shoulder.From = neck_position
-                        right_shoulder_position = _right_shoulder_position
-                        right_shoulder_position = vector2_new(right_shoulder_position.X, right_shoulder_position.Y)
-                        neck_to_right_shoulder.To = right_shoulder_position
+                    if from and world then
+                        local position, visible = world_to_viewport_point(camera, world)
+                        if visible then
+                            local to = vector2_new(position.X, position.Y)
+                            screen[bone[2]] = to
+                            line.From = from
+                            line.To = to
+                            shown = true
+                        end
                     end
-                end
 
-                left_shoulder_to_upper_arm.Visible = false
-                local left_upper_arm_position = nil
-                if left_shoulder_position and left_upper_arm_cframe then
-                    local _left_upper_arm_position, left_upper_arm_visible = world_to_viewport_point(camera, left_upper_arm_cframe.Position - left_upper_arm_cframe.UpVector / 2 - left_upper_arm_cframe.XVector / 3)
-
-                    if left_upper_arm_visible then
-                        left_shoulder_to_upper_arm.Visible = true
-                        left_shoulder_to_upper_arm.From = left_shoulder_position
-                        left_upper_arm_position = _left_upper_arm_position
-                        left_upper_arm_position = vector2_new(left_upper_arm_position.X, left_upper_arm_position.Y)
-                        left_shoulder_to_upper_arm.To = left_upper_arm_position
-                    end
-                end
-
-                right_shoulder_to_upper_arm.Visible = false
-                local right_upper_arm_position = nil
-                if right_shoulder_position and right_upper_arm_cframe then
-                    local _right_upper_arm_position, right_upper_arm_visible = world_to_viewport_point(camera, right_upper_arm_cframe.Position - right_upper_arm_cframe.UpVector / 2 + right_upper_arm_cframe.XVector / 3)
-
-                    if right_upper_arm_visible then
-                        right_shoulder_to_upper_arm.Visible = true
-                        right_shoulder_to_upper_arm.From = right_shoulder_position
-                        right_upper_arm_position = _right_upper_arm_position
-                        right_upper_arm_position = vector2_new(right_upper_arm_position.X, right_upper_arm_position.Y)
-                        right_shoulder_to_upper_arm.To = right_upper_arm_position
-                    end
-                end
-
-                left_upper_arm_to_lower_arm.Visible = false
-                local left_lower_arm_position = nil
-                if left_upper_arm_position and left_lower_arm_cframe then
-                    local _left_lower_arm_position, left_lower_arm_visible = world_to_viewport_point(camera, left_lower_arm_cframe.Position - left_lower_arm_cframe.UpVector / 2 - left_lower_arm_cframe.XVector / 4)
-
-                    if left_lower_arm_visible then
-                        left_upper_arm_to_lower_arm.Visible = true
-                        left_upper_arm_to_lower_arm.From = left_upper_arm_position
-                        left_lower_arm_position = _left_lower_arm_position
-                        left_lower_arm_position = vector2_new(left_lower_arm_position.X, left_lower_arm_position.Y)
-                        left_upper_arm_to_lower_arm.To = left_lower_arm_position
-                    end
-                end
-
-                right_upper_arm_to_lower_arm.Visible = false
-                local right_lower_arm_position = nil
-                if right_upper_arm_position and right_lower_arm_cframe then
-                    local _right_lower_arm_position, right_lower_arm_visible = world_to_viewport_point(camera, right_lower_arm_cframe.Position - right_lower_arm_cframe.UpVector / 2 + right_lower_arm_cframe.XVector / 4)
-
-                    if right_lower_arm_visible then
-                        right_upper_arm_to_lower_arm.Visible = true
-                        right_upper_arm_to_lower_arm.From = right_upper_arm_position
-                        right_lower_arm_position = _right_lower_arm_position
-                        right_lower_arm_position = vector2_new(right_lower_arm_position.X, right_lower_arm_position.Y)
-                        right_upper_arm_to_lower_arm.To = right_lower_arm_position
-                    end
-                end
-
-                left_lower_arm_to_hand.Visible = false
-                local left_hand_position = nil
-                if left_lower_arm_position and left_hand_cframe then
-                    local _left_hand_position, left_hand_visible = world_to_viewport_point(camera, left_hand_cframe.Position)
-
-                    if left_hand_visible then
-                        left_lower_arm_to_hand.Visible = true
-                        left_lower_arm_to_hand.From = left_lower_arm_position
-                        left_hand_position = _left_hand_position
-                        left_hand_position = vector2_new(left_hand_position.X, left_hand_position.Y)
-                        left_lower_arm_to_hand.To = left_hand_position
-                    end
-                end
-
-                right_lower_arm_to_hand.Visible = false
-                local right_hand_position = nil
-                if right_lower_arm_position and right_hand_cframe then
-                    local _right_hand_position, right_hand_visible = world_to_viewport_point(camera, right_hand_cframe.Position)
-
-                    if right_hand_visible then
-                        right_lower_arm_to_hand.Visible = true
-                        right_lower_arm_to_hand.From = right_lower_arm_position
-                        right_hand_position = _right_hand_position
-                        right_hand_position = vector2_new(right_hand_position.X, right_hand_position.Y)
-                        right_lower_arm_to_hand.To = right_hand_position
-                    end
-                end
-
-                neck_to_lower_torso.Visible = false
-                local lower_torso_position = nil
-                if neck_position and lower_torso_cframe then
-                    local _lower_torso_position, lower_torso_visible = world_to_viewport_point(camera, lower_torso_cframe.Position)
-
-                    if lower_torso_visible then
-                        neck_to_lower_torso.Visible = true
-                        neck_to_lower_torso.From = neck_position
-                        lower_torso_position = _lower_torso_position
-                        lower_torso_position = vector2_new(lower_torso_position.X, lower_torso_position.Y)
-                        neck_to_lower_torso.To = lower_torso_position
-                    end
-                end
-
-                lower_torso_to_left_upper_leg.Visible = false
-                local left_upper_leg_position = nil
-                if lower_torso_position and left_upper_leg_cframe then
-                    local _left_upper_leg_position, left_upper_leg_visible = world_to_viewport_point(camera, left_upper_leg_cframe.Position + left_upper_leg_cframe.UpVector / 2)
-
-                    if left_upper_leg_visible then
-                        lower_torso_to_left_upper_leg.Visible = true
-                        lower_torso_to_left_upper_leg.From = lower_torso_position
-                        left_upper_leg_position = _left_upper_leg_position
-                        left_upper_leg_position = vector2_new(left_upper_leg_position.X, left_upper_leg_position.Y)
-                        lower_torso_to_left_upper_leg.To = left_upper_leg_position
-                    end
-                end
-
-                lower_torso_to_right_upper_leg.Visible = false
-                local right_upper_leg_position = nil
-                if lower_torso_position and right_upper_leg_cframe then
-                    local _right_upper_leg_position, right_upper_leg_visible = world_to_viewport_point(camera, right_upper_leg_cframe.Position + right_upper_leg_cframe.UpVector / 2)
-
-                    if right_upper_leg_visible then
-                        lower_torso_to_right_upper_leg.Visible = true
-                        lower_torso_to_right_upper_leg.From = lower_torso_position
-                        right_upper_leg_position = _right_upper_leg_position
-                        right_upper_leg_position = vector2_new(right_upper_leg_position.X, right_upper_leg_position.Y)
-                        lower_torso_to_right_upper_leg.To = right_upper_leg_position
-                    end
-                end
-
-                left_upper_leg_to_lower_leg.Visible = false
-                local left_lower_leg_position = nil
-                if left_upper_leg_position and left_lower_leg_cframe then
-                    local _left_lower_leg_position, left_lower_leg_visible = world_to_viewport_point(camera, left_lower_leg_cframe.Position + left_lower_leg_cframe.UpVector / 2)
-
-                    if left_lower_leg_visible then
-                        left_upper_leg_to_lower_leg.Visible = true
-                        left_upper_leg_to_lower_leg.From = left_upper_leg_position
-                        left_lower_leg_position = _left_lower_leg_position
-                        left_lower_leg_position = vector2_new(left_lower_leg_position.X, left_lower_leg_position.Y)
-                        left_upper_leg_to_lower_leg.To = left_lower_leg_position
-                    end
-                end
-
-                right_upper_leg_to_lower_leg.Visible = false
-                local right_lower_leg_position = nil
-                if right_upper_leg_position and right_lower_leg_cframe then
-                    local _right_lower_leg_position, right_lower_leg_visible = world_to_viewport_point(camera, right_lower_leg_cframe.Position + right_lower_leg_cframe.UpVector / 2)
-
-                    if right_lower_leg_visible then
-                        right_upper_leg_to_lower_leg.Visible = true
-                        right_upper_leg_to_lower_leg.From = right_upper_leg_position
-                        right_lower_leg_position = _right_lower_leg_position
-                        right_lower_leg_position = vector2_new(right_lower_leg_position.X, right_lower_leg_position.Y)
-                        right_upper_leg_to_lower_leg.To = right_lower_leg_position
-                    end
-                end
-
-                left_lower_leg_to_foot.Visible = false
-                local left_foot_position = nil
-                if left_lower_leg_position and left_foot_cframe then
-                    local _left_foot_position, left_foot_visible = world_to_viewport_point(camera, left_foot_cframe.Position)
-
-                    if left_foot_visible then
-                        left_lower_leg_to_foot.Visible = true
-                        left_lower_leg_to_foot.From = left_lower_leg_position
-                        left_foot_position = _left_foot_position
-                        left_foot_position = vector2_new(left_foot_position.X, left_foot_position.Y)
-                        left_lower_leg_to_foot.To = left_foot_position
-                    end
-                end
-
-                right_lower_leg_to_foot.Visible = false
-                local right_foot_position = nil
-                if right_lower_leg_position and right_foot_cframe then
-                    local _right_foot_position, right_foot_visible = world_to_viewport_point(camera, right_foot_cframe.Position)
-
-                    if right_foot_visible then
-                        right_lower_leg_to_foot.Visible = true
-                        right_lower_leg_to_foot.From = right_lower_leg_position
-                        right_foot_position = _right_foot_position
-                        right_foot_position = vector2_new(right_foot_position.X, right_foot_position.Y)
-                        right_lower_leg_to_foot.To = right_foot_position
-                    end
+                    line.Visible = shown
                 end
             end
 
             heartbeat[#heartbeat+1] = draw
             heartbeat_inline[draw] = true
 
+            local finish = hit_skeleton_limiter.track(function()
+                alive = false
+
+                for i = 1, #heartbeat do
+                    if heartbeat[i] == draw then
+                        remove(heartbeat, i)
+                        break
+                    end
+                end
+
+                for i = 1, #lines do
+                    lines[i]:Destroy()
+                end
+            end)
+
             wait(hit_skeleton_lifetime)
 
-            if hit_skeleton_fade then
-                tween(head_to_neck, hide_transparency, quad, out, 0.2)
-                tween(neck_to_left_shoulder, hide_transparency, quad, out, 0.2)
-                tween(neck_to_right_shoulder, hide_transparency, quad, out, 0.2)
-                tween(left_shoulder_to_upper_arm, hide_transparency, quad, out, 0.2)
-                tween(right_shoulder_to_upper_arm, hide_transparency, quad, out, 0.2)
-                tween(left_upper_arm_to_lower_arm, hide_transparency, quad, out, 0.2)
-                tween(right_upper_arm_to_lower_arm, hide_transparency, quad, out, 0.2)
-                tween(left_lower_arm_to_hand, hide_transparency, quad, out, 0.2)
-                tween(right_lower_arm_to_hand, hide_transparency, quad, out, 0.2)
-                tween(neck_to_lower_torso, hide_transparency, quad, out, 0.2)
-                tween(lower_torso_to_left_upper_leg, hide_transparency, quad, out, 0.2)
-                tween(lower_torso_to_right_upper_leg, hide_transparency, quad, out, 0.2)
-                tween(left_upper_leg_to_lower_leg, hide_transparency, quad, out, 0.2)
-                tween(right_upper_leg_to_lower_leg, hide_transparency, quad, out, 0.2)
-                tween(left_lower_leg_to_foot, hide_transparency, quad, out, 0.2)
-                tween(right_lower_leg_to_foot, hide_transparency, quad, out, 0.2)
-
+            if alive and hit_skeleton_fade then
+                fade_elapsed = 0
                 wait(0.2)
             end
 
-            for i = 1, #heartbeat do
-                if heartbeat[i] == draw then
-                    remove(heartbeat, i)
-                    break
-                end
-            end
-
-            if head_to_neck then
-                head_to_neck:Destroy()
-                neck_to_left_shoulder:Destroy()
-                neck_to_right_shoulder:Destroy()
-                left_shoulder_to_upper_arm:Destroy()
-                right_shoulder_to_upper_arm:Destroy()
-                left_upper_arm_to_lower_arm:Destroy()
-                right_upper_arm_to_lower_arm:Destroy()
-                left_lower_arm_to_hand:Destroy()
-                right_lower_arm_to_hand:Destroy()
-                neck_to_lower_torso:Destroy()
-                lower_torso_to_left_upper_leg:Destroy()
-                lower_torso_to_right_upper_leg:Destroy()
-                left_upper_leg_to_lower_leg:Destroy()
-                right_upper_leg_to_lower_leg:Destroy()
-                left_lower_leg_to_foot:Destroy()
-                right_lower_leg_to_foot:Destroy()
-            end
+            finish()
         end)
 
         create_connection(menu_references["hit_skeleton"]["on_toggle_change"], function(value)
@@ -15790,8 +15729,15 @@ end
     end
 
     local hit_sound_data = hit_sounds["juju"]
+    local hit_sound_limiter = hit_effect_limiter()
 
-    local do_hit_sound = function()
+    local do_hit_sound = function(player)
+        -- Stacked sounds in one burst are one loud click anyway; the gap
+        -- keeps a Sound instance from being made for each of them.
+        if player and not hit_sound_limiter.allow(player) then
+            return
+        end
+
         delay(0, destroy, create_instance("Sound", {
             ["SoundId"] = hit_sound_data,
             ["Volume"] = flags["hit_sound_volume"],
@@ -15952,9 +15898,31 @@ end
 
         local hit_particle_connection = nil
         local hit_particle = hit_particles["sparks"]
+        local hit_particle_limiter = hit_effect_limiter()
+        -- One ColorSequence per slot (normal / lethal), rebuilt only when that
+        -- slot's colour changes instead of a new one on every hit.
+        local hit_particle_cache = {{}, {}}
+
+        local hit_particle_sequence = function(slot, color)
+            local cache = hit_particle_cache[slot]
+
+            if cache[1] ~= color then
+                cache[1] = color
+                cache[2] = ColorSequence["new"](color)
+            end
+
+            return cache[2]
+        end
 
         local do_hit_particle = LPH_NO_VIRTUALIZE(function(player, part)
-            local color = ColorSequence["new"](player_data[player][18] and flags["hit_particle_lethal_color"] or flags["hit_particle_color"])
+            local data = player_data[player]
+
+            if not data or not hit_particle_limiter.allow(player) then
+                return
+            end
+
+            local lethal = data[18]
+            local color = hit_particle_sequence(lethal and 2 or 1, lethal and flags["hit_particle_lethal_color"] or flags["hit_particle_color"])
             local z_offset = flags["hit_particle_behind_walls"] and 1 or 0
             hit_particle_part["CFrame"] = part["CFrame"]
             for _, particle in hit_particle do
@@ -16075,10 +16043,14 @@ end
             return tonumber(name) or 2
         end)
 
+        local damage_number_limiter = hit_effect_limiter()
+
         local do_damage_number = LPH_JIT_MAX(function(player, part, damage, _, message)
             local data = player_data[player]
 
-            if not data then
+            -- A hit skipped by the gap only drops its pop-up; the damage
+            -- itself is untouched, it is reported elsewhere by the server.
+            if not data or not damage_number_limiter.allow(player) then
                 return
             end
 
@@ -16184,7 +16156,7 @@ end
         -- instead of a new coroutine per tracer per frame.
         heartbeat_inline[new_function] = true
 
-            delay(lifetime + new_half, function()
+            local finish = damage_number_limiter.track(function()
                 for i = 1, #heartbeat do
                     if heartbeat[i] == new_function then
                         remove(heartbeat, i)
@@ -16198,6 +16170,8 @@ end
                     info:Destroy()
                 end
             end)
+
+            delay(lifetime + new_half, finish)
         end)
 
         create_connection(menu_references["damage_number"]["on_toggle_change"], function(value)
@@ -16226,8 +16200,13 @@ end
         local d3_hit_marker_connection = nil
         local d3_hit_marker_color = color3_fromrgb(255, 255, 255)
         local d3_hit_marker_outline_color = color3_fromrgb(15, 15, 15)
+        local d3_hit_marker_limiter = hit_effect_limiter()
 
         local do_d3_hit_marker = LPH_NO_VIRTUALIZE(function(player, part)
+            if not player_data[player] or not d3_hit_marker_limiter.allow(player) then
+                return
+            end
+
             local lines = {}
             local outlines = {}
             local thickness = flags["d3_hit_marker_thickness"]
@@ -16253,6 +16232,8 @@ end
             local lifetime = flags["d3_hit_marker_lifetime"]
             local position = part["Position"]
             local elapsed_time = 0
+            local shown = true
+            local last_x, last_y = nil, nil
 
             local new_function = function(dt)
                 elapsed_time+=dt
@@ -16260,23 +16241,33 @@ end
                 local position, on_screen = world_to_viewport_point(camera, position)
 
                 if on_screen then
-                    local position_x = position["X"]
-                    local position_y = position["Y"]
+                    local position_x = floor(position["X"] + 0.5)
+                    local position_y = floor(position["Y"] + 0.5)
 
-                    for i = 1, 4 do
-                        lines[i]["Visible"] = true
-                        outlines[i]["Visible"] = true
+                    if not shown then
+                        shown = true
+                        for i = 1, 4 do
+                            lines[i]["Visible"] = true
+                            outlines[i]["Visible"] = true
+                        end
                     end
 
                     if elapsed_time > lifetime then
                         local elapsed_time = elapsed_time - lifetime
-                        local transparency = 1 + (0 - 1) * get_value(tween_service, elapsed_time / 0.3, quad, out)
+                        local transparency = 1 + (0 - 1) * get_value(tween_service, clamp(elapsed_time / 0.3, 0, 1), quad, out)
 
                         for i = 1, 4 do
                             lines[i]["Transparency"] = transparency
                             outlines[i]["Transparency"] = transparency
                         end
                     end
+
+                    -- Same pixel as last frame: the eight endpoints are
+                    -- already where they need to be.
+                    if position_x == last_x and position_y == last_y then
+                        return
+                    end
+                    last_x, last_y = position_x, position_y
 
                     local from1 = vector2_new(position_x - 10, position_y - 10)
                     local to1 = vector2_new(position_x - 5, position_y - 5)
@@ -16297,7 +16288,8 @@ end
                     local to4 = vector2_new(position_x + 5, position_y + 5)
                     lines[4]["From"], lines[4]["To"] = from4, to4
                     outlines[4]["From"], outlines[4]["To"] = from4, to4
-                else
+                elseif shown then
+                    shown = false
                     for i = 1, 4 do
                         lines[i]["Visible"] = false
                         outlines[i]["Visible"] = false
@@ -16310,7 +16302,7 @@ end
         -- instead of a new coroutine per tracer per frame.
         heartbeat_inline[new_function] = true
 
-            delay(lifetime + 0.3, function()
+            local finish = d3_hit_marker_limiter.track(function()
                 for i = 1, #heartbeat do
                     if heartbeat[i] == new_function then
                         remove(heartbeat, i)
@@ -16325,6 +16317,8 @@ end
                     outlines[i] = nil
                 end
             end)
+
+            delay(lifetime + 0.3, finish)
         end)
 
         create_connection(menu_references["d3_hit_marker"]["on_toggle_change"], function(value)
@@ -16353,8 +16347,13 @@ end
         local d2_hit_marker_connection = nil
         local d2_hit_marker_color = color3_fromrgb(255, 255, 255)
         local d2_hit_marker_outline_color = color3_fromrgb(15, 15, 15)
+        local d2_hit_marker_limiter = hit_effect_limiter()
 
         local do_d2_hit_marker = LPH_NO_VIRTUALIZE(function(player)
+            if not player_data[player] or not d2_hit_marker_limiter.allow(player) then
+                return
+            end
+
             local lines = {}
             local outlines = {}
             local thickness = flags["d2_hit_marker_thickness"]
@@ -16379,28 +16378,31 @@ end
 
             local lifetime = flags["d2_hit_marker_lifetime"]
             local elapsed_time = 0
+            local last_viewport = nil
 
             local new_function = function(dt)
                 elapsed_time+=dt
 
-                local position = camera["ViewportSize"]/2
-                local position_x = position["X"]
-                local position_y = position["Y"]
-
-                for i = 1, 4 do
-                    lines[i]["Visible"] = true
-                    outlines[i]["Visible"] = true
-                end
-
                 if elapsed_time > lifetime then
                     local elapsed_time = elapsed_time - lifetime
-                    local transparency = 1 + (0 - 1) * get_value(tween_service, elapsed_time / 0.2, quad, out)
+                    local transparency = 1 + (0 - 1) * get_value(tween_service, clamp(elapsed_time / 0.2, 0, 1), quad, out)
 
                     for i = 1, 4 do
                         lines[i]["Transparency"] = transparency
                         outlines[i]["Transparency"] = transparency
                     end
                 end
+
+                -- Centre of the screen: it only moves when the window resizes.
+                local viewport = camera["ViewportSize"]
+                if viewport == last_viewport then
+                    return
+                end
+                last_viewport = viewport
+
+                local position = viewport/2
+                local position_x = position["X"]
+                local position_y = position["Y"]
 
                 local from1 = vector2_new(position_x - 10, position_y - 10)
                 local to1 = vector2_new(position_x - 5, position_y - 5)
@@ -16428,7 +16430,7 @@ end
         -- instead of a new coroutine per tracer per frame.
         heartbeat_inline[new_function] = true
 
-            delay(lifetime + 0.2, function()
+            local finish = d2_hit_marker_limiter.track(function()
                 for i = 1, #heartbeat do
                     if heartbeat[i] == new_function then
                         remove(heartbeat, i)
@@ -16443,6 +16445,8 @@ end
                     outlines[i] = nil
                 end
             end)
+
+            delay(lifetime + 0.2, finish)
         end)
 
         create_connection(menu_references["d2_hit_marker"]["on_toggle_change"], function(value)
@@ -16491,9 +16495,23 @@ end
         })
         local only_last_hit = nil
         local last_model = nil
+        local hit_chams_limiter = hit_effect_limiter()
+        -- model -> finish from the limiter; finish destroys the clone once.
+        local hit_chams_finish = setmetatable({}, {["__mode"] = "k"})
+
+        local destroy_model = function(model)
+            local finish = hit_chams_finish[model]
+
+            if finish then
+                hit_chams_finish[model] = nil
+                finish()
+            else
+                destroy(model)
+            end
+        end
 
         local destroy_hit_chams_none = function(model)
-            destroy(model)
+            destroy_model(model)
         end
 
         local destroy_hit_chams_fade = LPH_NO_VIRTUALIZE(function(model)
@@ -16501,7 +16519,8 @@ end
             local elapsed_time = 0
 
             local tween_function = function(dt)
-                if model then
+                -- A clone retired early by the cap stops animating at once.
+                if hit_chams_finish[model] then
                     elapsed_time+=dt
                     local transparency = hit_chams_transparency + (1 - hit_chams_transparency) * get_value(tween_service, elapsed_time / 0.25, quad, out)
                     for i = 1, #children do
@@ -16523,7 +16542,7 @@ end
                         break
                     end
                 end
-                destroy(model)
+                destroy_model(model)
             end)
         end)
 
@@ -16545,14 +16564,19 @@ end
                 end
             end
 
+            -- A clone with no head used to return here and was never removed,
+            -- leaving it in the world for the rest of the session.
             if not head then
+                destroy_model(model)
                 return
             end
 
             local tween_function = function(dt)
-                if model then
+                -- A clone retired early by the cap stops animating at once.
+                if hit_chams_finish[model] then
                     elapsed_time+=dt
                     local transparency = hit_chams_transparency + (1 - hit_chams_transparency) * get_value(tween_service, elapsed_time / 0.15, quad, out)
+                    local grow = size*transparency
                     for i = 1, #children do
                         local child = children[i]
                         local child_transparency = child["Transparency"]
@@ -16562,7 +16586,7 @@ end
                             local old_size = old_sizes[child]
 
                             if old_size then
-                                child["Size"] = old_size + size*transparency
+                                child["Size"] = old_size + grow
                             end
                         end
                     end
@@ -16578,15 +16602,36 @@ end
                         break
                     end
                 end
-                destroy(model)
+                destroy_model(model)
             end)
         end)
 
         local destroy_hit_chams = destroy_hit_chams_new_fade
 
+        -- Registers a finished clone with the limiter. Over the cap, the oldest
+        -- clone is destroyed straight away instead of fading.
+        local track_hit_chams = function(model)
+            hit_chams_finish[model] = hit_chams_limiter.track(function()
+                hit_chams_finish[model] = nil
+                destroy(model)
+            end)
+        end
+
+        -- Lifetime timer target. A clone the cap already removed is skipped
+        -- instead of starting a fade on a destroyed model.
+        local expire_hit_chams = function(model)
+            if hit_chams_finish[model] then
+                destroy_hit_chams(model)
+            end
+        end
+
         local do_hit_chams = LPH_NO_VIRTUALIZE(function(player)
+            if not hit_chams_limiter.allow(player) then
+                return
+            end
+
             if last_model and only_last_hit then
-                destroy(last_model)
+                destroy_model(last_model)
             end
 
             last_model = nil
@@ -16638,14 +16683,19 @@ end
 
                 last_model = new_model
                 new_model["Parent"] = ignored
+                track_hit_chams(new_model)
 
-                delay(hit_chams_lifetime, destroy_hit_chams, new_model)
+                delay(hit_chams_lifetime, expire_hit_chams, new_model)
             end
         end)
 
         local do_hit_chams_outline = LPH_NO_VIRTUALIZE(function(player)
+            if not hit_chams_limiter.allow(player) then
+                return
+            end
+
             if last_model and only_last_hit then
-                destroy(last_model)
+                destroy_model(last_model)
             end
 
             last_model = nil
@@ -16687,8 +16737,9 @@ end
 
                 last_model = new_model
                 new_model["Parent"] = ignored
+                track_hit_chams(new_model)
 
-                delay(hit_chams_lifetime, destroy_hit_chams, new_model)
+                delay(hit_chams_lifetime, expire_hit_chams, new_model)
             end
         end)
 
@@ -22380,7 +22431,7 @@ local backtrack_data = {}
         menu_references["auto_loadout_health"]:set_visible(false)
         menu_references["follow_target"] = menu_references["utility_section"]:create_element({["name"] = "follow target"}, {["toggle"] = {["flag"] = "follow_target"}})
         menu_references["follow_target_settings"] = menu_references["follow_target"]:create_settings()
-        menu_references["follow_target_style"] = menu_references["follow_target_settings"]:create_element({["name"] = "follow style"}, {["dropdown"] = {["flag"] = "follow_target_dropdown", ["options"] = {"random spam", "random", "strafe"}, ["default"] = {"random"}, ["multi"] = false, ["requires_one"] = true}})
+        menu_references["follow_target_style"] = menu_references["follow_target_settings"]:create_element({["name"] = "follow style"}, {["dropdown"] = {["flag"] = "follow_target_dropdown", ["options"] = {"random spam", "random", "strafe", "spiral"}, ["default"] = {"random"}, ["multi"] = false, ["requires_one"] = true}})
         menu_references["follow_target_stop_if"] = menu_references["follow_target_settings"]:create_element({["name"] = "stop if"}, {["dropdown"] = {["flag"] = "follow_target_stop_if", ["options"] = {"no gun equipped", "target knocked", "reloading"}, ["default"] = {"no gun equipped", "target knocked", "reloading"}, ["multi"] = true, ["requires_one"] = false}})
         menu_references["follow_target_distance"] = menu_references["follow_target_settings"]:create_element({["name"] = "distance"}, {["slider"] = {["flag"] = "follow_target_distance", ["min"] = 2, ["max"] = 200, ["default"] = 15, ["suffix"] = " studs"}})
         menu_references["follow_target_height"] = menu_references["follow_target_settings"]:create_element({["name"] = "height"}, {["slider"] = {["flag"] = "follow_target_height", ["min"] = -200, ["max"] = 200, ["default"] = 0, ["suffix"] = " studs"}})
@@ -24778,6 +24829,26 @@ local backtrack_data = {}
             hrp["Velocity"] = old_velocity
         end
 
+        local sin, cos, tau = math["sin"], math["cos"], math["pi"] * 2
+
+        -- Vertical spiral: loop over and under the target like a wheel, while
+        -- the loop's plane slowly turns around it so each pass comes from a
+        -- new side. The ring widens from 30% of distance to the full distance
+        -- over 8 loops, then narrows again. laps = loops per second; the plane
+        -- turns 1/15 of a circle per loop.
+        local spiral_follow_offset = LPH_JIT_MAX(function(t, laps, distance)
+            local turns = t * laps
+            local angle = tau * (turns % 1)
+            local climb = (turns / 8) % 2
+            if climb > 1 then
+                climb = 2 - climb
+            end
+            local radius = distance * (0.3 + 0.7 * climb)
+            local side = sin(angle) * radius
+            local yaw = tau * ((turns / 15) % 1)
+            return vector3_new(cos(yaw) * side, cos(angle) * radius, sin(yaw) * side)
+        end)
+
         local follow_target = LPH_JIT_MAX(function(dt, hrp, bypass)
             local waiting_for_forcefield = ragebot_target and (ragebot_target[7] or spawn_guard["check"](ragebot_target))
 
@@ -24818,6 +24889,11 @@ local backtrack_data = {}
                         new_cframe = cframe_new(math_random() * 18000000000 - 9000000000, math_random(-400, 2147483647), math_random() * 18000000000 - 9000000000)
                     end
                     new_cframe*=cframe_angles(rad(math_random(1,359)), rad(math_random(1,359)), rad(math_random(1,359)))
+                elseif follow_target_style == "spiral" then
+                    -- speed 1..100% maps to 0.05..5 loops per second. The loop
+                    -- is vertical, so height has no meaning here and is hidden.
+                    local offset = spiral_follow_offset(clock(), speed * 0.05, distance)
+                    new_cframe = cframe_new(ragebot_aim_position + offset, ragebot_aim_position)
                 else
                     new_cframe = cframe_angles(0,rad(360 * ((clock() * speed) % 1)),0) * cframe_new(0,0,distance) + (ragebot_aim_position + height)
                 end
@@ -24857,8 +24933,9 @@ local backtrack_data = {}
 
         create_connection(menu_references["follow_target_style"]["on_dropdown_change"], function(value)
             follow_target_style = value[1]
-            menu_references["follow_target_height"]:set_visible(follow_target_style == "strafe")
-            menu_references["follow_target_speed"]:set_visible(follow_target_style == "strafe")
+            local is_strafe = follow_target_style == "strafe"
+            menu_references["follow_target_height"]:set_visible(is_strafe)
+            menu_references["follow_target_speed"]:set_visible(is_strafe or follow_target_style == "spiral")
         end)
 
         create_connection(menu_references["follow_target_distance"]["on_slider_change"], function(value)
@@ -25587,9 +25664,14 @@ local backtrack_data = {}
 
     local do_auto_armor = LPH_JIT_MAX(function(dt, hrp)
         local tick = clock()
-        if (local_armor < threshold and not local_knocked) and (tick-last_attempt > cooldown) then
+        if (local_armor < threshold and not local_knocked and not purchasing) and (tick-last_attempt > cooldown) then
             last_attempt = tick
-            if local_cash > 5000 then
+
+            -- The real shop price, not a fixed $5000 guess: armor that cost
+            -- less was skipped, and a price above 5000 was walked to and failed.
+            local shop = shops["high-medium armor"]
+
+            if shop and affordable_count(local_cash, shop[2], 1) > 0 then
                 purchase_item("high-medium armor")
             end
         end
@@ -26382,7 +26464,17 @@ local backtrack_data = {}
                 end
 
                 if minimum_clips - floor(rounds/max_ammo) >= 0 then
-                    purchase_item(gun["Name"]:sub(2, -2):lower().." ammo", amount)
+                    local item = gun["Name"]:sub(2, -2):lower().." ammo"
+                    local shop = shops[item]
+
+                    -- Only as many clips as cash covers. Nothing affordable
+                    -- means no trip to the shop at all.
+                    local count = shop and affordable_count(local_cash, shop[2], amount) or 0
+
+                    if count > 0 then
+                        purchase_item(item, count)
+                        return
+                    end
                 end
             end
         end)
