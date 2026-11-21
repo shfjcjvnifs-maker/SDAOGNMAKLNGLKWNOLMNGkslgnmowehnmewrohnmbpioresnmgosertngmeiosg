@@ -14901,10 +14901,6 @@ end
         menu_references["hit_sound_settings"] = menu_references["hit_sound"]:create_settings()
         menu_references["hit_sound_value"] = menu_references["hit_sound_settings"]:create_element({["name"] = "sound"}, {["dropdown"] = {["flag"] = "hit_sound_value", ["default"] = {"mc bow"}, ["options"] = {"primordial", "neverlose", "sparkle", "mc bow", "skeet", "break", "rust"}, ["requires_one"] = true, ["use_custom_extensions"] = {"mp3", "ogg", "wav"}}})
         menu_references["hit_sound_volume"] = menu_references["hit_sound_settings"]:create_element({["name"] = "volume"}, {["slider"] = {["flag"] = "hit_sound_volume", ["min"] = 0.1, ["max"] = 5, ["default"] = 1, ["decimals"] = 1}})
-    menu_references["hit_effects"] = menu_references["game_section"]:create_element({["name"] = "hit effect limits"}, {}):create_settings()
-        menu_references["hit_effects_max"] = menu_references["hit_effects"]:create_element({["name"] = "max per effect"}, {["slider"] = {["flag"] = "hit_effects_max", ["min"] = 1, ["max"] = 20, ["default"] = 6, ["suffix"] = "", ["prefix"] = ""}})
-        menu_references["hit_effects_gap"] = menu_references["hit_effects"]:create_element({["name"] = "min gap per target"}, {["slider"] = {["flag"] = "hit_effects_gap", ["min"] = 0, ["max"] = 500, ["default"] = 60, ["suffix"] = "ms", ["prefix"] = "", ["min_text"] = "off"}})
-
     -- >> ( local bullet tracers )
 
     local beams = {
@@ -15388,87 +15384,6 @@ end
         end)
     end
 
-    -- >> ( hit effect limits )
-
-    -- Every hit effect builds drawings, clones or heartbeat closures, and a
-    -- burst of hits stacked dozens of them at once. Each effect gets its own
-    -- limiter: allow(target) skips an effect on a target hit again within
-    -- interval seconds, and track(cleanup) keeps at most cap effects alive,
-    -- retiring the oldest first. track returns finish, which runs cleanup at
-    -- most once however many times it is called (cap retire or own timer).
-    local new_hit_effect_limiter = LPH_NO_VIRTUALIZE(function(cap, interval)
-        local limiter = {cap = cap, interval = interval}
-        local last_shown = setmetatable({}, {["__mode"] = "k"})
-        local live = {}
-
-        limiter.allow = function(target)
-            local now = clock()
-            local last = last_shown[target]
-
-            if last and now - last < limiter.interval then
-                return false
-            end
-
-            last_shown[target] = now
-            return true
-        end
-
-        limiter.track = function(cleanup)
-            local entry = {cleanup}
-
-            entry[2] = function()
-                local run = entry[1]
-
-                if run == nil then
-                    return
-                end
-
-                entry[1] = nil
-
-                for i = 1, #live do
-                    if live[i] == entry then
-                        table.remove(live, i)
-                        break
-                    end
-                end
-
-                run()
-            end
-
-            live[#live + 1] = entry
-
-            while #live > limiter.cap do
-                live[1][2]()
-            end
-
-            return entry[2]
-        end
-
-        return limiter
-    end)
-
-    -- >> ( hit effect limit wiring )
-
-    local hit_effect_limiters = {}
-
-    local hit_effect_limiter = function()
-        local limiter = new_hit_effect_limiter(flags["hit_effects_max"] or 6, (flags["hit_effects_gap"] or 60) / 1000)
-        hit_effect_limiters[#hit_effect_limiters + 1] = limiter
-        return limiter
-    end
-
-    create_connection(menu_references["hit_effects_max"]["on_slider_change"], function(value)
-        for i = 1, #hit_effect_limiters do
-            hit_effect_limiters[i].cap = value
-        end
-    end)
-
-    create_connection(menu_references["hit_effects_gap"]["on_slider_change"], function(value)
-        for i = 1, #hit_effect_limiters do
-            hit_effect_limiters[i].interval = value / 1000
-        end
-    end)
-
     -- >> ( hit skeleton )
 
     do
@@ -15569,12 +15484,10 @@ end
             return joints
         end)
 
-        local hit_skeleton_limiter = hit_effect_limiter()
-
         local do_hit_skeleton = LPH_NO_VIRTUALIZE(function(player)
             local data = player_data[player]
 
-            if not data or not data[3] or not hit_skeleton_limiter.allow(player) then
+            if not data or not data[3] then
                 return
             end
 
@@ -15649,7 +15562,7 @@ end
             heartbeat[#heartbeat+1] = draw
             heartbeat_inline[draw] = true
 
-            local finish = hit_skeleton_limiter.track(function()
+            local finish = function()
                 alive = false
 
                 for i = 1, #heartbeat do
@@ -15662,7 +15575,7 @@ end
                 for i = 1, #lines do
                     lines[i]:Destroy()
                 end
-            end)
+            end
 
             wait(hit_skeleton_lifetime)
 
@@ -15729,15 +15642,8 @@ end
     end
 
     local hit_sound_data = hit_sounds["juju"]
-    local hit_sound_limiter = hit_effect_limiter()
 
     local do_hit_sound = function(player)
-        -- Stacked sounds in one burst are one loud click anyway; the gap
-        -- keeps a Sound instance from being made for each of them.
-        if player and not hit_sound_limiter.allow(player) then
-            return
-        end
-
         delay(0, destroy, create_instance("Sound", {
             ["SoundId"] = hit_sound_data,
             ["Volume"] = flags["hit_sound_volume"],
@@ -15898,7 +15804,6 @@ end
 
         local hit_particle_connection = nil
         local hit_particle = hit_particles["sparks"]
-        local hit_particle_limiter = hit_effect_limiter()
         -- One ColorSequence per slot (normal / lethal), rebuilt only when that
         -- slot's colour changes instead of a new one on every hit.
         local hit_particle_cache = {{}, {}}
@@ -15917,7 +15822,7 @@ end
         local do_hit_particle = LPH_NO_VIRTUALIZE(function(player, part)
             local data = player_data[player]
 
-            if not data or not hit_particle_limiter.allow(player) then
+            if not data then
                 return
             end
 
@@ -16043,14 +15948,10 @@ end
             return tonumber(name) or 2
         end)
 
-        local damage_number_limiter = hit_effect_limiter()
-
         local do_damage_number = LPH_JIT_MAX(function(player, part, damage, _, message)
             local data = player_data[player]
 
-            -- A hit skipped by the gap only drops its pop-up; the damage
-            -- itself is untouched, it is reported elsewhere by the server.
-            if not data or not damage_number_limiter.allow(player) then
+            if not data then
                 return
             end
 
@@ -16156,7 +16057,7 @@ end
         -- instead of a new coroutine per tracer per frame.
         heartbeat_inline[new_function] = true
 
-            local finish = damage_number_limiter.track(function()
+            local finish = function()
                 for i = 1, #heartbeat do
                     if heartbeat[i] == new_function then
                         remove(heartbeat, i)
@@ -16169,7 +16070,7 @@ end
                 if info then
                     info:Destroy()
                 end
-            end)
+            end
 
             delay(lifetime + new_half, finish)
         end)
@@ -16200,10 +16101,9 @@ end
         local d3_hit_marker_connection = nil
         local d3_hit_marker_color = color3_fromrgb(255, 255, 255)
         local d3_hit_marker_outline_color = color3_fromrgb(15, 15, 15)
-        local d3_hit_marker_limiter = hit_effect_limiter()
 
         local do_d3_hit_marker = LPH_NO_VIRTUALIZE(function(player, part)
-            if not player_data[player] or not d3_hit_marker_limiter.allow(player) then
+            if not player_data[player] then
                 return
             end
 
@@ -16302,7 +16202,7 @@ end
         -- instead of a new coroutine per tracer per frame.
         heartbeat_inline[new_function] = true
 
-            local finish = d3_hit_marker_limiter.track(function()
+            local finish = function()
                 for i = 1, #heartbeat do
                     if heartbeat[i] == new_function then
                         remove(heartbeat, i)
@@ -16316,7 +16216,7 @@ end
                     outlines[i]:Destroy()
                     outlines[i] = nil
                 end
-            end)
+            end
 
             delay(lifetime + 0.3, finish)
         end)
@@ -16347,10 +16247,9 @@ end
         local d2_hit_marker_connection = nil
         local d2_hit_marker_color = color3_fromrgb(255, 255, 255)
         local d2_hit_marker_outline_color = color3_fromrgb(15, 15, 15)
-        local d2_hit_marker_limiter = hit_effect_limiter()
 
         local do_d2_hit_marker = LPH_NO_VIRTUALIZE(function(player)
-            if not player_data[player] or not d2_hit_marker_limiter.allow(player) then
+            if not player_data[player] then
                 return
             end
 
@@ -16430,7 +16329,7 @@ end
         -- instead of a new coroutine per tracer per frame.
         heartbeat_inline[new_function] = true
 
-            local finish = d2_hit_marker_limiter.track(function()
+            local finish = function()
                 for i = 1, #heartbeat do
                     if heartbeat[i] == new_function then
                         remove(heartbeat, i)
@@ -16444,7 +16343,7 @@ end
                     outlines[i]:Destroy()
                     outlines[i] = nil
                 end
-            end)
+            end
 
             delay(lifetime + 0.2, finish)
         end)
@@ -16495,8 +16394,8 @@ end
         })
         local only_last_hit = nil
         local last_model = nil
-        local hit_chams_limiter = hit_effect_limiter()
-        -- model -> finish from the limiter; finish destroys the clone once.
+
+        -- model -> finish; finish destroys the clone once.
         local hit_chams_finish = setmetatable({}, {["__mode"] = "k"})
 
         local destroy_model = function(model)
@@ -16519,7 +16418,7 @@ end
             local elapsed_time = 0
 
             local tween_function = function(dt)
-                -- A clone retired early by the cap stops animating at once.
+                -- Only fade while the clone is still tracked.
                 if hit_chams_finish[model] then
                     elapsed_time+=dt
                     local transparency = hit_chams_transparency + (1 - hit_chams_transparency) * get_value(tween_service, elapsed_time / 0.25, quad, out)
@@ -16572,7 +16471,7 @@ end
             end
 
             local tween_function = function(dt)
-                -- A clone retired early by the cap stops animating at once.
+                -- Only fade while the clone is still tracked.
                 if hit_chams_finish[model] then
                     elapsed_time+=dt
                     local transparency = hit_chams_transparency + (1 - hit_chams_transparency) * get_value(tween_service, elapsed_time / 0.15, quad, out)
@@ -16608,17 +16507,26 @@ end
 
         local destroy_hit_chams = destroy_hit_chams_new_fade
 
-        -- Registers a finished clone with the limiter. Over the cap, the oldest
-        -- clone is destroyed straight away instead of fading.
+        -- Registers a finished clone so its fade and lifetime timer both end in
+        -- one destroy.
         local track_hit_chams = function(model)
-            hit_chams_finish[model] = hit_chams_limiter.track(function()
+            local finished = false
+
+            local finish = function()
+                if finished then
+                    return
+                end
+
+                finished = true
                 hit_chams_finish[model] = nil
                 destroy(model)
-            end)
+            end
+
+            hit_chams_finish[model] = finish
         end
 
-        -- Lifetime timer target. A clone the cap already removed is skipped
-        -- instead of starting a fade on a destroyed model.
+        -- Lifetime timer target. A clone already removed is skipped instead of
+        -- starting a fade on a destroyed model.
         local expire_hit_chams = function(model)
             if hit_chams_finish[model] then
                 destroy_hit_chams(model)
@@ -16626,10 +16534,6 @@ end
         end
 
         local do_hit_chams = LPH_NO_VIRTUALIZE(function(player)
-            if not hit_chams_limiter.allow(player) then
-                return
-            end
-
             if last_model and only_last_hit then
                 destroy_model(last_model)
             end
@@ -16690,10 +16594,6 @@ end
         end)
 
         local do_hit_chams_outline = LPH_NO_VIRTUALIZE(function(player)
-            if not hit_chams_limiter.allow(player) then
-                return
-            end
-
             if last_model and only_last_hit then
                 destroy_model(last_model)
             end
